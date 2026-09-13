@@ -14,6 +14,7 @@
 - **SLA 超时提醒**：按优先级计算时限，列表高亮超时项，看板汇总超时工单。
 - **Excel 导出**：事件、CMDB、请求、变更列表均支持导出 `.xlsx`（本地 SheetJS）。
 - **响应式布局**：桌面侧栏常驻，窄屏自动折叠为抽屉式菜单。
+- **导航拖拽排序**：侧边导航项（工作台 / 智能服务 / 系统各组内）可用鼠标拖拽自由调整顺序，落点有插入线提示；排序结果持久化在独立键 `opsdesk.navOrder.v1`，刷新后保持，且不受「重置演示数据」影响。
 
 ## IT 智能助手（AI Assistant）
 
@@ -224,11 +225,12 @@ EDGE="C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" node verify-
 
 ```bash
 python upload.py --check          # 只读自检，确认凭据可用
+python upload.py --dry-run        # 只列出将上传的文件，不发起请求
 python upload.py                  # 上传全部文件
 GH_FILES="README.md,bot.js" python upload.py   # 只传指定文件
 ```
 
-> 两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
+> 文件清单**自动维护**：`collect_files()` 按白名单扩展名（`.html/.css/.js/.md/.png/.py`）扫描目录，并排除 `_shot-*` 截图页、`*.log`、线上校验下载的 `live-*` 副本、隐藏文件等临时产物——**新增脚本或截图后直接跑 `python upload.py` 即可，不用手工往清单里加名字**。不放心时先 `--dry-run` 看一眼清单；未被收集的文件会在输出里列成 `SKIP` 便于核对。另两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
 
 ## 预览
 
