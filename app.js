@@ -6,6 +6,7 @@
   "use strict";
 
   const LS_KEY = "opsdesk.db.v2";
+  const NAV_ORDER_KEY = "opsdesk.navOrder.v1";   // 导航排序偏好：独立于主库，重置演示数据时保留
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s,  r = document) => Array.from(r.querySelectorAll(s));
 
@@ -707,8 +708,103 @@
     toast("CMDB 已导出为 Excel");
   }
 
+  /* ---------- 导航拖拽排序（HTML5 DnD，组内自由排序，localStorage 持久化） ---------- */
+  function navKey(el) { return el.dataset.page ? el.dataset.page : "action:" + (el.dataset.action || ""); }
+
+  /** 把当前 #nav 的组内顺序写入 localStorage（结构：[{label, items:[key...]}, ...]） */
+  function saveNavOrder() {
+    const groups = [];
+    $$("#nav .group-label").forEach(label => {
+      const items = [];
+      let el = label.nextElementSibling;
+      while (el && !el.classList.contains("group-label")) {
+        if (el.classList.contains("nav-item")) items.push(navKey(el));
+        el = el.nextElementSibling;
+      }
+      groups.push({ label: label.textContent.trim(), items });
+    });
+    try { localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(groups)); } catch (e) { /* 隐私模式等场景静默失败 */ }
+  }
+
+  /** 启动时按保存的顺序重排导航；未保存过的项保持原位，已删除的项自动忽略（前后兼容） */
+  function applyNavOrder() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || "null"); } catch (e) { saved = null; }
+    if (!Array.isArray(saved)) return;
+    const nav = $("#nav");
+    if (!nav) return;
+    saved.forEach(g => {
+      const label = $$("#nav .group-label").find(l => l.textContent.trim() === g.label);
+      if (!label || !Array.isArray(g.items)) return;
+      let anchor = label;
+      g.items.forEach(key => {
+        const sel = key.indexOf("action:") === 0
+          ? '.nav-item[data-action="' + key.slice(7) + '"]'
+          : '.nav-item[data-page="' + key + '"]';
+        const item = nav.querySelector(sel);
+        if (item && item.parentElement === nav) {
+          nav.insertBefore(item, anchor.nextElementSibling);
+          anchor = item;
+        }
+      });
+    });
+  }
+
+  /** 为导航项绑定拖拽：仅允许同组内换位（group-label 不拖动），落点用插入线提示 */
+  function initNavDrag() {
+    const nav = $("#nav");
+    if (!nav) return;
+    const items = $$(".nav-item", nav);
+    let dragged = null;
+
+    const sameGroup = (a, b) => {
+      // 两元素同属一个 group-label 分区才允许排序
+      const groupOf = (el) => {
+        let cur = el.previousElementSibling;
+        while (cur && !cur.classList.contains("group-label")) cur = cur.previousElementSibling;
+        return cur || null;
+      };
+      return groupOf(a) === groupOf(b);
+    };
+    const clearMarks = () => items.forEach(n => n.classList.remove("drop-before", "drop-after"));
+
+    items.forEach(n => {
+      n.draggable = true;
+      n.addEventListener("dragstart", (e) => {
+        dragged = n;
+        n.classList.add("dragging");
+        try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", navKey(n)); } catch (err) { /* jsdom 无 dataTransfer，拖拽状态靠闭包变量 dragged */ }
+      });
+      n.addEventListener("dragend", () => {
+        n.classList.remove("dragging");
+        dragged = null;
+        clearMarks();
+      });
+      n.addEventListener("dragover", (e) => {
+        if (!dragged || dragged === n || !sameGroup(dragged, n)) return;
+        e.preventDefault();                       // 必须 preventDefault 才允许 drop
+        clearMarks();
+        const rect = n.getBoundingClientRect();
+        // 鼠标在目标上半部 → 插到它前面，否则插到后面
+        const before = (e.clientY || 0) < rect.top + rect.height / 2;
+        n.classList.add(before ? "drop-before" : "drop-after");
+        n._dropBefore = before;
+      });
+      n.addEventListener("dragleave", () => n.classList.remove("drop-before", "drop-after"));
+      n.addEventListener("drop", (e) => {
+        if (!dragged || dragged === n || !sameGroup(dragged, n)) return;
+        e.preventDefault();
+        if (n._dropBefore) nav.insertBefore(dragged, n);
+        else nav.insertBefore(dragged, n.nextElementSibling);
+        clearMarks();
+        saveNavOrder();
+      });
+    });
+  }
+
   /* ---------- 绑定 ---------- */
   function bind() {
+    initNavDrag();
     $$(".nav-item").forEach(n => {
       if (n.dataset.page) n.addEventListener("click", () => switchPage(n.dataset.page));
       if (n.dataset.action === "reset") n.addEventListener("click", () => {
@@ -911,11 +1007,13 @@
     },
     constants: { STATUS, PRIORITY, APPROVAL, SLA_HOURS, CATEGORIES, CI_TYPES, KB_CATS, REQ_TYPES, CHG_TYPES, CHG_RISK },
     util: { uid, nowISO, fmtDate, fmtDay, fmtDur, escapeHtml, slaInfo, slaDeadline },
+    navOrder: { apply: applyNavOrder, save: saveNavOrder },   // 供测试与调试
   };
 
   /* ---------- 启动 ---------- */
   function init() {
     if (!load()) seed();
+    applyNavOrder();   // 先恢复用户自定义的导航顺序，再绑定事件
     bind();
     switchPage("dashboard");
   }
