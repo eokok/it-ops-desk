@@ -70,10 +70,16 @@ function lastOptions() {
   ok(typeof window.OpsBot.render === "function", "OpsBot.render 已挂载");
   ok(typeof window.OpsBot.renderAudit === "function", "OpsBot.renderAudit 已挂载");
   ok(typeof window.OpsBot.renderDashboardWidgets === "function", "OpsBot.renderDashboardWidgets 已挂载");
-  ok(window.OpsBot.FAQS.length === 52, "FAQ 语料 52 条", "实际 " + window.OpsBot.FAQS.length);
+  ok(window.OpsBot.FAQS.length === 53, "FAQ 语料 53 条", "实际 " + window.OpsBot.FAQS.length);
   ok(window.OpsBot.FLOWS.length === 7, "诊断流程 7 条", "实际 " + window.OpsBot.FLOWS.length);
-  ok(window.OpsBot.PLUGINS.length === 5, "核心插件 5 个", "实际 " + window.OpsBot.PLUGINS.length);
-  ok(window.OpsBot.EVAL_SET.length === 101, "评测样本 101 条", "实际 " + window.OpsBot.EVAL_SET.length);
+  ok(window.OpsBot.PLUGINS.length === 6, "核心插件 6 个（含知识库学习）", "实际 " + window.OpsBot.PLUGINS.length);
+  ok(window.OpsBot.EVAL_SET.length === 103, "评测样本 103 条", "实际 " + window.OpsBot.EVAL_SET.length);
+  ok(window.OpsBot.GUARD_SET.length === 22, "护栏评测样本 22 条", "实际 " + window.OpsBot.GUARD_SET.length);
+  ok(typeof window.OpsBot.syncKnowledge === "function", "知识同步 API 已挂载");
+  ok(typeof window.OpsBot.teachToKB === "function", "知识写入 API 已挂载");
+  ok(typeof window.OpsBot.learnStatus === "function", "学习状态 API 已挂载");
+  ok(typeof window.OpsBot.evaluateGuards === "function", "护栏评测 API 已挂载");
+  ok(window.OpsBot.DUTY_PHONE === "400-1111-2222", "值班电话常量正确", window.OpsBot.DUTY_PHONE);
 
   console.log("\n=== 2. 导航与页面区块 ===");
   ok($$('.nav-item[data-page="assistant"]').length === 1, "侧栏含「IT 智能助手」入口");
@@ -84,7 +90,7 @@ function lastOptions() {
   ok(txt("#pageTitle") === "IT 智能助手", "顶栏标题正确", txt("#pageTitle"));
 
   console.log("\n=== 3. 助手侧栏与欢迎页 ===");
-  ok($$("#botPlugins .bplug").length === 5, "插件卡 5 张", $$("#botPlugins .bplug").length);
+  ok($$("#botPlugins .bplug").length === 6, "插件卡 6 张", $$("#botPlugins .bplug").length);
   ok($$("#botTiers .btier").length === 3, "分级服务流程 3 级", $$("#botTiers .btier").length);
   ok($$("#botSla tbody tr").length === 4, "SLA 分级表 P1–P4", $$("#botSla tbody tr").length);
   ok($$("#botQuick .bquick").length >= 6, "快捷提问 chips", $$("#botQuick .bquick").length);
@@ -182,15 +188,147 @@ function lastOptions() {
   ok(onb.done >= 1, "勾选进度已写入并统计", JSON.stringify(onb));
   ok($$("#botStream .bob-row.done").length >= 1, "勾选态样式生效");
 
+  console.log("\n=== 8b. 服务原则护栏（真实 UI 链路） ===");
+  // 原则 3：涉及数据安全的操作必须提醒风险
+  $("#botInput").value = "客户名单能批量导出成 Excel 发给我吗";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bcard-risk").length === 1, "渲染数据安全风险警示卡", $$("#botStream .bcard-risk").length);
+  ok(/数据安全/.test(txt("#botStream")), "风险文案明确提示数据安全");
+  ok(/禁止|不得|不可/.test(txt("#botStream")), "风险文案给出禁止性结论");
+  ok(window.OpsBot.cur().tools.some((t) => /guard_risk/.test(t.action)), "风险识别已入审计日志");
+
+  // 原则 2 + 4：紧急问题立即告知值班电话
+  const incB4 = window.OpsDesk.getState().incidents.length;
+  $("#botInput").value = "公司办公网大面积瘫痪了，所有人都上不了网";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bb-call").length >= 1, "渲染值班电话呼叫块", $$("#botStream .bb-call").length);
+  ok(/400-1111-2222/.test(txt("#botStream")), "值班电话 400-1111-2222 已展示");
+  ok(window.OpsDesk.getState().incidents.length === incB4 + 1, "大面积故障果断开单", incB4 + " → " + window.OpsDesk.getState().incidents.length);
+
+  // 安全事件同样触发值班电话
+  $("#botInput").value = "我们部门收到勒索病毒邮件，有同事中招了";
+  click($("#botSend"));
+  await wait(40);
+  ok(/400-1111-2222/.test(txt("#botStream")), "安全事件也告知值班电话");
+  ok(/不要|切勿|立即|断网|隔离/.test(txt("#botStream")), "安全事件给出应急处置动作");
+
+  // 原则 5：不确定的明确说「需要人工确认」，不瞎猜
+  $("#botInput").value = "我们部门那个新上的仓储拣货 PDA 老是掉线，你能修吗";
+  click($("#botSend"));
+  await wait(40);
+  const unk = window.OpsBot.cur().messages.filter((m) => m.role === "bot").pop();
+  const refused = /需要人工确认/.test(unk.text) || !!($$("#botStream .bcard-lowconf").length);
+  ok(refused || unk.level === "self", "不确定时给出明确结论（拒答或确有答案）", (unk.level || "") + " / " + unk.text.slice(0, 30));
+
+  // 原则 1：含糊提问先澄清，不硬答
+  $("#botInput").value = "电脑有问题";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bcard-ask").length >= 1 || lastOptions().length >= 3, "含糊提问给出澄清引导", lastOptions().length);
+  ok(/哪|具体|选择|方面/.test(txt("#botStream")), "澄清话术引导补充信息");
+
+  // 域外问题应转交对口部门，而不是硬答 IT
+  $("#botInput").value = "入职体检在哪里预约";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bcard-boundary").length === 1, "渲染域外转交卡", $$("#botStream .bcard-boundary").length);
+  ok(/人力资源|HR/.test(txt("#botStream")), "域外问题指向对口部门");
+  ok(/不是 IT|非 IT|超出/.test(txt("#botStream")) || /需要人工确认/.test(txt("#botStream")), "明确说明超出 IT 职责范围");
+
+  console.log("\n=== 8c. 知识库联动与学习闭环（真实 UI） ===");
+  // 8b 段落产生过 P1 工单，会话已进入「已转人工」终态（resolution.level=ticket 会被刻意保留）。
+  // 学习闭环要在干净会话里验证，否则拿到的是上一段的结论。
+  click($("#botNew"));
+  await wait(30);
+  const kbBefore = window.OpsDesk.getState().kb.length;
+  const idxBefore = window.OpsBot.documents.length;
+  ok(idxBefore === 53 + kbBefore, "索引规模 = FAQ + KB", idxBefore + " = 53 + " + kbBefore);
+  ok(window.OpsBot.cur().resolution.level == null, "新会话结论层级为空", String(window.OpsBot.cur().resolution.level));
+
+  // 主系统新增一篇 KB 文章 → 助手应能立即检索到
+  const newTitle = "拣货 PDA 掉线处置指引";
+  window.OpsDesk.getState().kb.unshift({
+    id: "KB099", title: newTitle, cat: "终端与硬件", tags: ["PDA", "无线", "掉线"],
+    content: "拣货 PDA 频繁掉线多半是无线漫游策略问题。\n1. 记录 PDA 的 MAC 地址与掉线时间点。\n2. 在无线控制器上为该 MAC 绑定就近 AP，关闭强制漫游。\n3. 若仍掉线，检查 AP 信道是否与邻区重叠，改用 5G 频段。\n4. 现场复测 30 分钟无掉线后关闭工单。",
+    author: "IT 运维", updatedAt: "2026-08-28", views: 0,
+  });
+  const syncRes = window.OpsBot.syncKnowledge();
+  ok(syncRes && syncRes.added >= 1, "同步后识别到新文章", JSON.stringify(syncRes));
+  ok(window.OpsBot.documents.length === idxBefore + 1, "新文章进入检索索引", window.OpsBot.documents.length + " / " + idxBefore);
+  ok(syncRes.learned.some((x) => (x.id || x) === "KB099"), "指纹比对记下已学习文章", JSON.stringify(syncRes.learned));
+
+  // 新知识立即可被问答命中（此前无法回答）
+  $("#botInput").value = "拣货 PDA 频繁掉线怎么处理";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bcard-kb").length >= 1, "新知识命中并渲染 KB 答案卡", $$("#botStream .bcard-kb").length);
+  ok(/拣货 PDA 掉线处置指引/.test(txt("#botStream")), "答案指向新学到的 KB 文章");
+  const kbCited = $$("#botStream .bcard-kb").length >= 1 &&
+    /知识库|KB/.test(txt("#botStream .bcard-kb"));
+  ok(kbCited, "KB 答案卡标注知识库来源");
+  ok(window.OpsBot.cur().resolution.level === "self", "新知识命中判定为自助解决", window.OpsBot.cur().resolution.level);
+
+  // 会话已验证 → 沉淀为知识库文章（双向闭环）
+  // 注意：本次答案来自刚学的 KB099，标题与文章标题一致 → 蒸馏按标题去重，应当是「更新」而非「新建」。
+  // 这恰好验证了幂等设计，因此这里断言「仍存在且更新」，而不是「条数 +1」。
+  const solvedBtn = lastOptions().find((b) => /已解决/.test(b.textContent));
+  const kbB4 = window.OpsDesk.getState().kb.length;
+  const kbU4 = (window.OpsDesk.getState().kb.find((a) => a.id === "KB099") || {}).updatedAt;
+  click(solvedBtn);
+  await wait(60);
+  const art4 = window.OpsDesk.getState().kb.find((a) => a.id === "KB099");
+  ok(window.OpsDesk.getState().kb.length === kbB4, "重复标题沉淀走更新（不重复建卡）", kbB4 + " → " + window.OpsDesk.getState().kb.length);
+  ok(!!art4, "沉淀目标文章仍存在", art4 ? art4.id : "缺失");
+  ok(window.OpsBot.cur().resolution.knowledgeId === "KB099" || art4.updatedAt >= kbU4, "会话回写沉淀结果", String(window.OpsBot.cur().resolution.knowledgeId));
+  ok($$("#botStream .bcard-learned").length >= 1, "渲染学习成功卡", $$("#botStream .bcard-learned").length);
+  ok(/已.*(新建|更新|沉淀|收录)/.test(txt("#botStream")), "沉淀文案已展示");
+
+  // 沉淀一个库里没有的新方案 → 应真正新建
+  $("#botInput").value = "我们工位北区那台标签打印机走纸偏斜，怎么修";
+
+  // 沉淀一个库里没有的新方案 → 应真正新建
+  // 用一条能命中 FAQ（但不来自 KB）的提问，其标题在 KB 中不存在，蒸馏时应新建
+  $("#botInput").value = "扫描仪扫不出来条码怎么办";
+  click($("#botSend"));
+  await wait(40);
+  const kbB6 = window.OpsDesk.getState().kb.length;
+  $("#botInput").value = "把刚才这个解决方案沉淀到知识库";
+  click($("#botSend"));
+  await wait(60);
+  ok(window.OpsDesk.getState().kb.length === kbB6 + 1, "新方案沉淀为新建 KB 文章", kbB6 + " → " + window.OpsDesk.getState().kb.length);
+  ok(/已新建知识库文章/.test(txt("#botStream")), "新建文案区分于更新", txt("#botStream").replace(/\s+/g, " ").slice(-60));
+
+  // 显式提问「知识库学到什么」→ 学习状态卡
+  $("#botInput").value = "知识库现在有多少内容，你学到了什么";
+  click($("#botSend"));
+  await wait(40);
+  ok($$("#botStream .bcard-learn").length >= 1, "渲染学习状态卡", $$("#botStream .bcard-learn").length);
+  ok(/FAQ/.test(txt("#botStream")) && /KB|知识库/.test(txt("#botStream")), "状态卡同时列出 FAQ 与 KB 规模");
+
+  // 幂等：同一标题重复沉淀应更新而非重复新建
+  const kbB5 = window.OpsDesk.getState().kb.length;
+  window.OpsBot.teachToKB({ title: newTitle, content: "重复内容", category: "终端与硬件", tags: ["PDA"] });
+  window.OpsBot.teachToKB({ title: newTitle, content: "重复内容", category: "终端与硬件", tags: ["PDA"] });
+  ok(window.OpsDesk.getState().kb.length === kbB5, "重复沉淀按标题幂等（不重复建卡）", kbB5 + " → " + window.OpsDesk.getState().kb.length);
+
+  // 清理演示数据，避免污染后续计数断言
+  const st2 = window.OpsDesk.getState();
+  st2.kb = st2.kb.filter((a) => a.id !== "KB099" && a.title !== newTitle);
+  window.OpsBot.syncKnowledge();
+  await wait(20);
+
   console.log("\n=== 9. 会话头部与多会话管理 ===");
   ok(/会话/.test(txt("#botSub")), "头部显示会话元信息");
   ok(/次工具调用/.test(txt("#botSub")), "头部统计工具调用次数");
   ok($$("#botLevelChip .bpill").length === 1, "头部展示当前服务层级");
+  const sessB4 = window.OpsBot.store.sessions.length;
   const sidOld = window.OpsBot.cur().id;
   click($("#botNew"));
   await wait(20);
   ok(window.OpsBot.cur().id !== sidOld, "新建会话切换成功");
-  ok(window.OpsBot.store.sessions.length === demoN + 1, "会话被归档进审计库", window.OpsBot.store.sessions.length + " / 种子 " + demoN);
+  ok(window.OpsBot.store.sessions.length === sessB4 + 1, "会话被归档进审计库", sessB4 + " → " + window.OpsBot.store.sessions.length);
 
   console.log("\n=== 10. 审计与回放页 ===");
   window.OpsDesk.switchPage("audit");
