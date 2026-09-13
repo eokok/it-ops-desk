@@ -583,11 +583,12 @@ window.OpsBotFlows = (() => {
      3. 插件注册表元信息（用于展示与统计）
      ============================================================ */
   const PLUGIN_META = [
-    { id: "faq",     name: "FAQ 知识库",   icon: "📚", desc: "52 条高频问题，命中即给答案，支持自助解决" },
+    { id: "faq",     name: "FAQ + 知识库", icon: "📚", desc: "53 条高频问题 + 运维知识库，命中即给答案，支持自助解决" },
     { id: "rag",     name: "语义检索 RAG", icon: "🔎", desc: "从知识库与历史工单中检索并生成带引用的回答" },
     { id: "diag",    name: "故障诊断工作流", icon: "🧭", desc: "7 条决策树流程，逐步定位故障根因" },
-    { id: "ticket",  name: "工单系统",      icon: "🎫", desc: "对话中直接建单、查进度、按 SLA 分级响应" },
+    { id: "ticket",  name: "工单系统",      icon: "🎫", desc: "对话中直接建单、查进度，按 SLA 分级响应，紧急问题直达值班电话" },
     { id: "onboard", name: "新员工入职指引", icon: "🎓", desc: "四阶段 21 项清单，进度可保存" },
+    { id: "kb",      name: "知识库学习",   icon: "🗂️", desc: "与主系统 KB 双向联动：同步学习新文章，把已验证方案沉淀成文章" },
   ];
 
   return { FLOWS, ONBOARD, PLUGIN_META };
