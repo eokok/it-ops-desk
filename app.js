@@ -738,7 +738,9 @@
     ["kbSearch", "kbFilterCat"].forEach(id => $("#" + id).addEventListener("input", renderKB));
     $("#btnNewKB").addEventListener("click", () => {
       openModal("新建知识文章", kbForm(), kbFoot());
-      $("#saveKbBtn").addEventListener("click", () => { if (collectKB()) { closeModal(); renderKB(); toast("知识文章已创建"); } });
+      $("#saveKbBtn").addEventListener("click", () => {
+        if (collectKB()) { closeModal(); renderKB(); toast("知识文章已创建"); notifyBotLearn(); }
+      });
       $("#cancelBtn").addEventListener("click", closeModal);
     });
 
@@ -816,7 +818,9 @@
         $("#closeKb").addEventListener("click", closeModal);
         $("#editKbBtn").addEventListener("click", () => {
           openModal("编辑知识文章 - " + k.id, kbForm(k), kbFoot());
-          $("#saveKbBtn").addEventListener("click", () => { if (collectKB(k.id)) { closeModal(); renderKB(); toast("已保存"); } });
+          $("#saveKbBtn").addEventListener("click", () => {
+            if (collectKB(k.id)) { closeModal(); renderKB(); toast("已保存"); notifyBotLearn(); }
+          });
           $("#cancelBtn").addEventListener("click", closeModal);
         });
       }
@@ -883,8 +887,19 @@
     });
   }
 
-  /* ---------- 对外接口：供 IT 智能助手 / 审计模块复用同一份数据 ---------- */
-  window.OpsDesk = {
+  /* ---------- 知识库 → 智能助手 学习联动 ----------
+     KB 文章一旦新增或修改，立即让助手重建检索索引，实现「学到新知识」 */
+  function notifyBotLearn() {
+    try {
+      if (!window.OpsBot || typeof window.OpsBot.syncKnowledge !== "function") return;
+      const r = window.OpsBot.syncKnowledge();
+      if (r && r.added) {
+        toast("知识库已更新，智能助手已学习 " + r.added + " 篇新文章");
+      }
+    } catch (e) { console.warn("bot learn sync failed", e); }
+  }
+
+  /* ---------- 对外接口：供 IT 智能助手 / 审计模块复用同一份数据 ---------- */  window.OpsDesk = {
     getState: () => state,
     save, toast, switchPage, closeModal, openModal,
     renderDashboard, renderIncidents, renderCMDB, renderKB, renderRequests, renderChanges,
