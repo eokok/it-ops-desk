@@ -157,7 +157,7 @@
     $$(".page").forEach(p => p.classList.remove("active"));
     $("#page-" + page).classList.add("active");
     $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.page === page));
-    const titles = { dashboard: "数据看板", incidents: "事件管理 (Incident)", cmdb: "配置管理 (CMDB)", kb: "知识库 (KB)", requests: "服务请求 (Request)", changes: "变更管理 (Change)" };
+    const titles = { dashboard: "数据看板", incidents: "事件管理 (Incident)", cmdb: "配置管理 (CMDB)", kb: "知识库 (KB)", requests: "服务请求 (Request)", changes: "变更管理 (Change)", assistant: "IT 智能助手", audit: "审计与回放" };
     $("#pageTitle").textContent = titles[page] || "";
     $("#sidebar").classList.remove("open");
     if (page === "dashboard") renderDashboard();
@@ -166,6 +166,12 @@
     if (page === "kb") renderKB();
     if (page === "requests") renderRequests();
     if (page === "changes") renderChanges();
+    // IT 智能助手模块（由 bot.js 提供，解耦调用）
+    if (window.OpsBot) {
+      if (page === "assistant") window.OpsBot.render();
+      if (page === "audit") window.OpsBot.renderAudit();
+      if (page === "dashboard") window.OpsBot.renderDashboardWidgets();
+    }
   }
 
   /* ---------- Dashboard ---------- */
@@ -876,6 +882,21 @@
       }
     });
   }
+
+  /* ---------- 对外接口：供 IT 智能助手 / 审计模块复用同一份数据 ---------- */
+  window.OpsDesk = {
+    getState: () => state,
+    save, toast, switchPage, closeModal, openModal,
+    renderDashboard, renderIncidents, renderCMDB, renderKB, renderRequests, renderChanges,
+    refresh() {
+      const active = document.querySelector(".page.active");
+      const cur = active ? active.id.replace("page-", "") : "dashboard";
+      const map = { dashboard: renderDashboard, incidents: renderIncidents, cmdb: renderCMDB, kb: renderKB, requests: renderRequests, changes: renderChanges };
+      (map[cur] || renderDashboard)();
+    },
+    constants: { STATUS, PRIORITY, APPROVAL, SLA_HOURS, CATEGORIES, CI_TYPES, KB_CATS, REQ_TYPES, CHG_TYPES, CHG_RISK },
+    util: { uid, nowISO, fmtDate, fmtDay, fmtDur, escapeHtml, slaInfo, slaDeadline },
+  };
 
   /* ---------- 启动 ---------- */
   function init() {
