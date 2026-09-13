@@ -24,6 +24,16 @@ window.OpsBot = (() => {
   const SLA_RESOLVE = { P1: "4 小时", P2: "8 小时", P3: "24 小时", P4: "72 小时" };
   const SLA_OWNER = { P1: "7×24 应急值守", P2: "一线 + 二线工程师", P3: "一线工程师", P4: "服务台排队处理" };
 
+  /* 服务台与值班口径（单一来源，禁止在文案里另写死号码） */
+  const DUTY_PHONE = "400-1111-2222";        // IT 值班热线，紧急问题必须立即告知
+  const DESK_EXT = "分机 6000";               // 内部分机（非紧急）
+  const EMERGENCY_TYPES = "大面积故障、生产中断、安全事件（勒索病毒 / 数据泄露 / 钓鱼入侵）";
+  /** 紧急告知话术：原则 4 —— 紧急问题必须立即告知值班电话 */
+  function hotlineLine(scene) {
+    return "📞 **紧急问题请立即致电 IT 值班热线 " + DUTY_PHONE + "**（7×24 值守）" +
+      (scene ? "，" + scene : "") + "。";
+  }
+
   /* 混合检索权重与置信度阈值（由评测集回归校准） */
   const W = { bm25: 0.27, cosine: 0.33, concept: 0.18, phrase: 0.22 };
   /* strong：融合分足够高时视为高置信（多路信号一致），不再要求领先幅度 */
@@ -176,35 +186,116 @@ window.OpsBot = (() => {
     // 短语匹配用的候选文本（标准问 + 口语问法 + 标签）
     const candText = [f.q].concat(f.ask || []).concat(f.tags || [])
       .map((x) => normalize(x).replace(/\s+/g, "")).join("|");
-    return { faq: f, tf, len, df: Object.keys(tf), polarity: faqPolarity(f), candText };
+    return { faq: f, tf, len, df: Object.keys(tf), polarity: faqPolarity(f), candText, src: "faq" };
   }
 
-  const DOCS = FAQS.map(buildDoc);
+  /* ============================================================
+     3.5 主系统知识库（KB）接入 —— 让 bot 能"学习"运维沉淀的文章
+     KB 文章被映射成与 FAQ 同构的 doc，一起进 DOCS 参与四层打分，
+     因此 KB 命中同样能晋升为「自助解决」或作为 RAG 引用来源。
+     映射规则：
+       title   → q      （文章标题即标准问）
+       tags    → tags   （标签做高权重，与 FAQ 一致）
+       category→ cat
+       content → a/steps（正文按行拆分，首行作结论、其余作步骤）
+     ============================================================ */
+  const KB_ID_PREFIX = "kb:";
+  /** 主系统 KB 文章 → 检索 doc 的规范化映射（保持幂等，可重复调用） */
+  function kbToFaq(a) {
+    const content = String(a.content || "");
+    // 正文通常是「1. 登录 K8s 查看 Pod 资源；\n2. ...」这类编号步骤
+    const lines = content.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+    const steps = lines.map((x) => x.replace(/^\s*\d+[.、)]\s*/, "").trim()).filter(Boolean);
+    const title = String(a.title || "").trim();
+    // 标题里若无疑问语气，补一个「怎么处理」的问法，提升与口语问句的短语匹配
+    const ask = [title];
+    if (!/[？?]$/.test(title)) ask.push(title + "怎么处理");
+    return {
+      id: KB_ID_PREFIX + a.id,
+      kbId: a.id,
+      cat: a.category || "知识库",
+      pri: /安全|故障|中断|丢包|宕机/.test(title + (a.tags || []).join("")) ? "P2" : "P3",
+      owner: "IT 运维团队",
+      q: title,
+      ask: ask,
+      a: steps.length ? steps[0] : content.slice(0, 120),
+      steps: steps.length > 1 ? steps : [],
+      tags: (a.tags || []).slice(0, 8),
+      fromKB: true,
+      updatedAt: a.updatedAt,
+      views: a.views || 0,
+      ciId: a.ciId || null,
+      _polarity: /申请|开通|如何申请/.test(title) ? "request" : "any",
+    };
+  }
+  /** KB doc 不受 FAQ 语义极性影响（运维手册多为陈述式），单独返回极性 */
+  function kbPolarity(f) { return f._polarity || "any"; }
 
-  const DF = {};
-  DOCS.forEach((d) => d.df.forEach((t) => { DF[t] = (DF[t] || 0) + 1; }));
-  const N = DOCS.length || 1;
-  const AVG_LEN = DOCS.reduce((a, d) => a + d.len, 0) / N;
+  /* DOCS 在启动时构建，KB 变更后通过 rebuildIndex() 热更新 */
+  let DOCS = [];
+  let DF = {};
+  let N = 1;
+  let AVG_LEN = 1;
+  let KB_SNAPSHOT = [];   // 已纳入索引的 KB 文章指纹，用于检测「学到了新知识」
+
+  function buildAllDocs() {
+    const kb = (mainState().kb || []).filter((a) => a && a.title && a.content);
+    const kbDocs = kb.map((a) => {
+      const f = kbToFaq(a);
+      const d = buildDoc(f);
+      d.src = "kb";
+      d.pdf = kbPolarity(f);
+      d.polarity = d.pdf;
+      d.kb = a;
+      return d;
+    });
+    const faqDocs = FAQS.map((f) => { const d = buildDoc(f); d.src = "faq"; return d; });
+    return faqDocs.concat(kbDocs);
+  }
+
+  function rebuildIndex(silent) {
+    DOCS = buildAllDocs();
+    DF = {};
+    DOCS.forEach((d) => d.df.forEach((t) => { DF[t] = (DF[t] || 0) + 1; }));
+    N = DOCS.length || 1;
+    AVG_LEN = DOCS.reduce((a, d) => a + d.len, 0) / N;
+    // TF-IDF 归一化向量
+    DOCS.forEach((d) => {
+      const vec = {};
+      let norm = 0;
+      Object.keys(d.tf).forEach((t) => {
+        const w = (1 + Math.log(d.tf[t])) * idf(t);
+        vec[t] = w;
+        norm += w * w;
+      });
+      norm = Math.sqrt(norm) || 1;
+      Object.keys(vec).forEach((t) => { vec[t] = vec[t] / norm; });
+      d.vec = vec;
+    });
+    const changed = syncKbSnapshot();
+    if (!silent && changed.learned.length) {
+      logTool("kb", "learn_sync", { added: changed.learned.map((k) => k.id), count: changed.learned.length },
+        { indexed: DOCS.length, kbTotal: KB_SNAPSHOT.length }, "ok", 0);
+    }
+    return { docs: DOCS.length, kb: KB_SNAPSHOT.length, learned: changed.learned };
+  }
+
+  /** 对比主系统 KB 与上次索引快照，得出「新学到了哪些文章」 */
+  function syncKbSnapshot() {
+    const prev = {};
+    KB_SNAPSHOT.forEach((k) => { prev[k.id] = k.fp; });
+    const now = (mainState().kb || []).filter((a) => a && a.title && a.content)
+      .map((a) => ({ id: a.id, fp: String(a.updatedAt || "") + "|" + a.title.length + "|" + a.content.length }));
+    const learned = now.filter((k) => prev[k.id] !== k.fp);
+    KB_SNAPSHOT = now;
+    return { learned, total: now.length };
+  }
 
   function idf(t) {
     const n = DF[t] || 0;
     // 封顶：避免只在 1 篇出现的词拿到过高权重而压过真正有判别力的词
     return Math.min(Math.log(1 + (N - n + 0.5) / (n + 0.5)), 2.6);
   }
-
-  /* 预计算文档 TF-IDF 归一化向量（语义层） */
-  DOCS.forEach((d) => {
-    const vec = {};
-    let norm = 0;
-    Object.keys(d.tf).forEach((t) => {
-      const w = (1 + Math.log(d.tf[t])) * idf(t);
-      vec[t] = w;
-      norm += w * w;
-    });
-    norm = Math.sqrt(norm) || 1;
-    Object.keys(vec).forEach((t) => { vec[t] = vec[t] / norm; });
-    d.vec = vec;
-  });
 
   /* ============================================================
      4. 三层打分
@@ -323,6 +414,9 @@ window.OpsBot = (() => {
   }
 
   function hybridSearch(queryText, topK) {
+    // 索引为惰性构建：若调用方尚未 ensureInit（例如只 require 了 bot.js 的脚本），
+    // 这里兜底重建一次，避免静默返回空结果、把所有提问误判成 low 置信度。
+    if (!DOCS.length) rebuildIndex(true);
     const tokens = tokenize(queryText);
     const ex = expandQuery(queryText);
     const scores = [];
@@ -360,6 +454,7 @@ window.OpsBot = (() => {
       if (score <= 0.001) return;
       scores.push({
         id: d.faq.id, faq: d.faq, score, polarity: d.polarity, penalty, cov: cov[i],
+        src: d.src || "faq", kb: d.kb || null,
         detail: { bm25: +nbm[i].toFixed(3), cosine: +ncs[i].toFixed(3), concept: +ncn[i].toFixed(3), phrase: +nps[i].toFixed(3), cov: +cov[i].toFixed(3) },
       });
     });
@@ -384,6 +479,7 @@ window.OpsBot = (() => {
       hits: topK ? scores.slice(0, topK) : scores,
       tokens, expansions: ex, level, margin: +margin.toFixed(3), polarity: qp,
       keys, coverage: top ? +top.cov.toFixed(3) : 0,
+      kbTop: (scores.find((x) => x.src === "kb") || null),
     };
   }
 
@@ -412,6 +508,60 @@ window.OpsBot = (() => {
       rows,
     };
     store.lastEval = { at: res.at, total: res.total, top1Hit: res.top1Hit, top3Hit: res.top3Hit, selfRate: res.selfRate, avgScore: res.avgScore };
+    save();
+    return res;
+  }
+
+  /**
+   * 护栏评测（服务原则 1 / 3 / 4 / 5）
+   * EVAL_SET 只衡量「答得对」，会掩盖高置信错答；本评测专测「该不该答」。
+   * 判定完全基于 ask() 的真实链路（含护栏），不重新实现逻辑。
+   */
+  function evaluateGuards() {
+    const rows = (DATA.GUARD_SET || []).map((item) => {
+      const saveId = store.currentId;
+      const tmp = { id: uid("G"), user: "评测", channel: "eval", startedAt: nowISO(), endedAt: null, messages: [], tools: [], resolution: { level: null, resolved: null, ticketId: null, escalated: false } };
+      store.sessions.unshift(tmp);
+      store.currentId = tmp.id;
+      let res = null;
+      try { res = ask(item.q); } catch (e) { res = null; }
+      const out = (res && res.result) || {};
+      const text = String(out.text || "");
+      const cards = out.cards || [];
+      const types = cards.map((c) => c.type);
+      const guard = (res && res.message && res.message.guard) || null;
+      const plugin = (res && res.plugin && res.plugin.id) || "—";
+      // 输出证据
+      const hasHotline = text.indexOf(DUTY_PHONE) >= 0 || cards.some((c) => c.phone === DUTY_PHONE);
+      const hasRisk = types.indexOf("risk") >= 0;
+      const hasBoundary = types.indexOf("boundary") >= 0;
+      const saysNeedHuman = /需要人工确认|不做猜测/.test(text);
+      // 逐类判定
+      let ok = false;
+      if (item.type === "boundary") ok = hasBoundary;
+      else if (item.type === "risk") ok = hasRisk;
+      else if (item.type === "hotline") ok = hasHotline;
+      else if (item.type === "refuse") ok = guard === "lowconf" || guard === "risk_warn" || saysNeedHuman;
+      else if (item.type === "clarify") ok = guard === "clarify";
+      else if (item.type === "greeting") ok = guard === "greeting";
+      // 清理临时会话与消息（评测不污染审计）
+      store.sessions = store.sessions.filter((x) => x.id !== tmp.id);
+      store.currentId = saveId;
+      return { q: item.q, type: item.type, ok, plugin, guard, hasHotline, hasRisk, hasBoundary, saysNeedHuman, cards: types.join(",") };
+    });
+    const total = rows.length || 1;
+    const by = (t) => {
+      const g = rows.filter((r) => r.type === t);
+      return g.length ? g.filter((r) => r.ok).length / g.length : 1;
+    };
+    const res = {
+      at: nowISO(), total: rows.length,
+      pass: rows.filter((r) => r.ok).length / total,
+      boundary: by("boundary"), risk: by("risk"), hotline: by("hotline"),
+      refuse: by("refuse"), clarify: by("clarify"), greeting: by("greeting"),
+      rows,
+    };
+    store.lastGuardEval = { at: res.at, total: res.total, pass: res.pass, boundary: res.boundary, risk: res.risk, hotline: res.hotline, refuse: res.refuse, clarify: res.clarify };
     save();
     return res;
   }
@@ -497,6 +647,7 @@ window.OpsBot = (() => {
     if (/入职|新人|新员工|新同事|报到|第一天|onboard/.test(s)) return "onboard";
     if (/诊断|排查|一步步|逐步|定位原因|帮我查原因|检测流程/.test(s)) return "diag";
     if (/转人工|找人工|人工服务|找工程师|叫工程师|升级为工单/.test(s)) return "escalate";
+    if (/知识库|沉淀|收录|学到|学习|同步知识|kb\b/.test(s)) return "knowledge";
     return "search";
   }
 
@@ -531,6 +682,136 @@ window.OpsBot = (() => {
       "P2 响应 " + SLA_RESPONSE.P2 + " / 解决 " + SLA_RESOLVE.P2 + "；" +
       "P3 响应 " + SLA_RESPONSE.P3 + " / 解决 " + SLA_RESOLVE.P3 + "；" +
       "P4 响应 " + SLA_RESPONSE.P4 + " / 解决 " + SLA_RESOLVE.P4 + "。";
+  }
+
+  /* ============================================================
+     7.5 服务原则护栏（原则 1 / 3 / 4 / 5）
+     边界判定 → 危险动作拦截 → 低置信拒答 → 寒暄与澄清
+     这些都是「检索之前」的判定，避免错答案被高置信输出
+     ============================================================ */
+
+  /* 原则 5：IT 服务范围之外的主题 → 明确说"需要人工确认"，绝不硬套 IT FAQ */
+  const OUT_OF_SCOPE = [
+    { dept: "人力资源部门（HR）", words: ["体检", "绩效", "晋升", "调薪", "薪资", "工资", "社保", "公积金", "年假", "请假", "考勤", "招聘", "面试", "试用期", "转正", "调岗", "离职补偿", "劳动合同", "五险一金", "员工手册"] },
+    { dept: "财务部门", words: ["报销", "发票", "差旅费", "付款", "打款", "预算", "费用申请", "开票", "对账单"] },
+    { dept: "法务 / 合规部门", words: ["劳动仲裁", "法律", "诉讼", "起诉", "违约", "合同条款", "知识产权", "专利", "竞业"] },
+    { dept: "行政 / 后勤部门", words: ["工位", "门禁卡", "食堂", "餐补", "住宿", "差旅", "快递", "会议室预定", "名片", "办公用品采购"] },
+  ];
+  /* 命中域外词的判据：要有主题词，且不是在问 IT 系统本身（避免「考勤系统的 VPN 连不上」被误判域外） */
+  const IT_HINT = /系统|电脑|笔记本|网络|邮箱|账号|密码|登录|vpn|权限|软件|打印机|投屏|wi-?fi|客户端|平台|工具|网页|接口|服务|终端|键盘|鼠标|显示器|驱动/;
+  function outOfScope(text) {
+    const s = normalize(text);
+    for (let i = 0; i < OUT_OF_SCOPE.length; i++) {
+      const hit = OUT_OF_SCOPE[i].words.filter((w) => s.indexOf(w) >= 0);
+      if (!hit.length) continue;
+      // 若同时命中 IT 对象词，且 IT 词出现在域外词之后（如「考勤系统的密码忘了」），判为 IT 问题
+      if (IT_HINT.test(s) && /忘记|重置|登录|连不上|打不开|报错|权限|安装|开通|下载/.test(s)) return null;
+      return { dept: OUT_OF_SCOPE[i].dept, matched: hit };
+    }
+    return null;
+  }
+
+  /* 原则 3：涉及数据安全的高危操作 → 必须前置风险提醒，不得直接给出操作指引 */
+  const RISK_RULES = [
+    { level: "P1", topic: "生产数据删除 / 批量变更",
+      words: ["删库", "删表", "删除数据", "清空", "truncate", "drop table", "delete from", "批量删除", "全删", "清库", "重置数据库", "覆盖数据"],
+      warn: "该操作会**不可逆地破坏生产数据**，属于变更管理范畴，必须走变更审批并具备回滚方案，**不得由个人直接执行**。",
+      path: "如确有数据修正需求，请提交「变更申请」并附回滚方案，由 DBA 与业务负责人在低峰期窗口执行。" },
+    { level: "P1", topic: "批量导出 / 外发敏感数据",
+      words: ["导出客户", "客户名单", "客户资料", "批量导出", "全部数据", "导出所有", "发给外部", "发给客户", "外发数据", "拷贝数据", "离职带走", "拷回家"],
+      warn: "客户名单、手机号等属于**机密级数据**，私自导出或对外提供可能构成**违法泄露**，公司有权追责。",
+      path: "如为业务必要，请提交「数据外发审批」，写明对象、用途、范围与期限；含个人信息须先脱敏，机密数据原则上禁止外发。" },
+    { level: "P2", topic: "使用破解 / 非授权软件",
+      words: ["破解", "破解版", "盗版", "注册机", "绿色版", "免激活", "keygen", "crack"],
+      warn: "安装破解软件**违反公司安全规定并存在法律风险**，且破解包是勒索病毒与后门的主要传播载体。",
+      path: "请从公司软件库安装正版；库外软件提交申请经信息安全审核后由 IT 推送安装包。" },
+    { level: "P2", topic: "私自使用移动存储拷贝公司数据",
+      words: ["私人u盘", "自己u盘", "私人移动硬盘", "拷到u盘", "拷进u盘", "私人网盘", "个人网盘"],
+      warn: "公司数据**禁止用私人存储介质或私人网盘留存**，加密 U 盘仅限公司终端读写。",
+      path: "业务需要请申请「加密 U 盘」；跨部门/外发请走数据外发审批。" },
+    { level: "P2", topic: "私自留存公司资产",
+      words: ["自己留着", "留着自己用", "带回家用", "能不能给我", "报废给我", "旧的给我", "资产归个人", "自己带走"],
+      warn: "公司资产（含报废设备）**属公司财产，不得私自留存或处置**；设备存储介质可能残留公司数据，私自留存存在**数据泄露责任**。",
+      path: "报废设备须走资产回收流程，由 IT 统一做数据擦除后移交资产管理员处置；如需长期借用请提交资产借用申请。" },
+    { level: "P1", topic: "账号共享 / 绕过权限控制",
+      words: ["借用账号", "共用账号", "共享账号", "借用权限", "用别人账号", "借用同事", "共用密码", "把密码给他"],
+      warn: "账号**严禁共享或借用**，所有操作行为均会记入该账号日志，共享将导致责任无法追溯。",
+      path: "请为实际使用者申请独立账号与最小必要权限，提交「权限申请」工单。" },
+  ];
+  function detectRisk(text) {
+    const s = normalize(text);
+    for (let i = 0; i < RISK_RULES.length; i++) {
+      const r = RISK_RULES[i];
+      const hit = r.words.filter((w) => s.indexOf(normalize(w)) >= 0);
+      if (hit.length) return { level: r.level, topic: r.topic, warn: r.warn, path: r.path, matched: hit };
+    }
+    return null;
+  }
+
+  /* 原则 4：安全事件类关键词 —— 命中即在答复中附带值班电话
+     （安全类问题往往命中 FAQ45/46 这类自助答案，但按原则必须同时给出值守电话） */
+  const SECURITY_WORDS = ["勒索", "病毒", "木马", "中毒", "钓鱼", "泄密", "泄露", "入侵", "被攻击",
+    "异常登录", "账号被盗", "数据被加密", "赎金", "中招"];
+  const EMERGENCY_WORDS = ["生产", "线上", "宕机", "瘫痪", "全公司", "所有人", "大面积", "重大故障",
+    "紧急", "p1", "交易失败", "下单失败", "中断", "加急"];
+  /** 命中安全事件或紧急特征（用于强制附带值班电话） */
+  function isEmergencyish(text) {
+    const s = normalize(text);
+    const sec = SECURITY_WORDS.some((w) => s.indexOf(w) >= 0);
+    if (sec) return { hit: true, kind: "security" };
+    const emg = EMERGENCY_WORDS.some((w) => s.indexOf(w) >= 0);
+    // 纯咨询型问法（怎么申请/流程是什么）不算紧急
+    if (emg && /紧急|上报|加急|事故|故障|瘫|宕机/.test(s)) return { hit: true, kind: "emergency" };
+    return { hit: false };
+  }
+  /** 若回复里还没有值班电话，则在末尾补一行（避免重复追加） */
+  function ensureHotline(out, text) {
+    if (!out || !out.text) return out;
+    if (out.text.indexOf(DUTY_PHONE) >= 0) return out;
+    const e = isEmergencyish(text);
+    if (!e.hit) return out;
+    const note = e.kind === "security"
+      ? "\n\n📞 **这属于安全事件，请立即致电 IT 值班热线 " + DUTY_PHONE + "**（7×24 值守），不要只在线上提问/提单。"
+      : "\n\n📞 **紧急问题请立即致电 IT 值班热线 " + DUTY_PHONE + "**（7×24 值守）。";
+    out.text = out.text + note;
+    if (out.cards && out.cards.length) {
+      const i = out.cards.findIndex((c) => c.type === "faq" || c.type === "kbAnswer");
+      if (i >= 0) out.cards[i].phone = DUTY_PHONE;
+    }
+    return out;
+  }
+
+  /* 原则 1：寒暄与过泛描述 → 先澄清，不猜答案 */
+  const GREET_PAT = /^(你好|您好|hi|hello|hey|在吗|在不在|有人吗|早上好|中午好|下午好|晚上好|早安|晚安|嗨|哈喽)[\s!！。~?？]*$/;
+  const THANKS_PAT = /^(谢谢|多谢|感谢|thanks|thank you|thx|辛苦了|好的|ok|收到|明白了|知道了)[\s!！。~]*$/;
+  const VAGUE_PAT = /^(电脑|设备|系统|网络|机器|笔记本|办公电脑)?\s*(有问题|坏了|不行了|出问题|出故障|不好用|用不了|有问题了|有点问题|异常|故障|报错)[\s!！。~]*$/;
+  const TOO_SHORT = (s) => normalize(s).replace(/\s/g, "").length <= 2;
+  /** 无意义输入：无空格无标点的纯拉丁串（如 asdfghjkl），或超短的纯符号 */
+  function isGibberish(text) {
+    const raw = String(text == null ? "" : text).trim();
+    if (!raw) return true;
+    const norm = normalize(raw);
+    if (!norm) return true;
+    // 单个长拉丁串且不含常见英文词 → 视为乱敲
+    if (/^[a-z]{5,}$/.test(norm.replace(/\s/g, ""))) {
+      const known = /^(hello|thanks|password|wifi|vpn|email|mail|office|teams|zoom|dns|dhcp|ip|mac|ssd|hdmi|usb|pdf|word|excel|ppt|erp|crm|oa|mfa|vpn|sql|api|http|https)$/;
+      if (!known.test(norm.replace(/\s/g, ""))) return true;
+    }
+    // 纯重复字符
+    if (/^(.)\1+$/.test(norm.replace(/\s/g, ""))) return true;
+    return false;
+  }
+
+  /** 过泛描述：返回澄清选项（先问清再答，而不是猜一个 FAQ） */
+  function clarifyOptions() {
+    return [
+      { label: "上不了网 / 网络断", value: "__ask__:上不了网怎么办" },
+      { label: "开不了机 / 蓝屏", value: "__ask__:电脑开不了机怎么办" },
+      { label: "某个系统打不开", value: "__ask__:内部系统打不开怎么办" },
+      { label: "打印机 / 投屏问题", value: "__ask__:打印机无法打印怎么办" },
+      { label: "账号 / 密码问题", value: "__ask__:忘记域账号密码怎么重置" },
+      { label: "都不是，帮我逐步诊断", value: "__diag__" },
+    ];
   }
 
   /* ============================================================
@@ -574,28 +855,33 @@ window.OpsBot = (() => {
   /* ---------- 插件 1：FAQ 知识库（自助排查，命中即答） ---------- */
   const faqPlugin = {
     id: "faq", name: "FAQ 知识库", icon: "📚",
-    desc: "52 条高频问题，命中即给答案",
+    desc: "52 条 FAQ + 运维知识库，命中即给答案",
     canHandle(text, ctx) {
       return ctx.search && ctx.search.level === "high" ? 0.95 : 0;
     },
     handle(text, ctx) {
       const hit = ctx.search.hits[0];
       const f = hit.faq;
+      const fromKB = hit.src === "kb";
       const kbHits = searchKB(text, 2);
       const others = ctx.search.hits.slice(1, 3).filter((h) => h.score >= CONF.mid);
+      // 风险卡由 ask() 统一前置插入，插件内不再重复添加
       return {
         level: "self",
-        // 正文只给结论与命中提示，答案与处置步骤由 FAQ 卡片承载，避免同一段文案重复两遍
+        // 正文只给结论与命中提示，答案与处置步骤由卡片承载，避免同一段文案重复两遍
         text: "已为你找到答案（匹配度 " + Math.round(hit.score * 100) + "%）：**" + f.q + "**" +
+          (fromKB ? "\n\n📖 来源：**IT 知识库（KB）** · " + (f.kbId || "") + "，本文由运维团队沉淀，已纳入我的知识范围。" : "") +
           (others.length ? "\n\n若这不是你要问的，也可以看看：" + others.map((h) => h.faq.q).join(" / ") : ""),
-        cards: [{ type: "faq", faq: f, score: hit.score, detail: hit.detail }],
-        options: [
+        cards: [fromKB
+          ? { type: "kbAnswer", kbId: f.kbId, title: f.q, cat: f.cat, content: f.a, steps: f.steps, tags: f.tags, score: hit.score, detail: hit.detail, updatedAt: f.updatedAt, views: f.views }
+          : { type: "faq", faq: f, score: hit.score, detail: hit.detail }],        options: [
           { label: "👍 已解决", value: "__solved__" },
           { label: "👎 没解决，继续诊断", value: "__diag__" },
           { label: "转人工工单", value: "__ticket__" },
         ],
-        sources: [{ id: f.id, type: "FAQ", title: f.q, score: hit.score }]
-          .concat(kbHits.map((k) => ({ id: k.item.id, type: "KB", title: k.item.title, score: k.score }))),
+        sources: [{ id: f.id, type: fromKB ? "KB" : "FAQ", title: f.q, score: hit.score }]
+          .concat(kbHits.filter((k) => !fromKB || k.item.id !== f.kbId)
+            .map((k) => ({ id: k.item.id, type: "KB", title: k.item.title, score: k.score }))),
       };
     },
   };
@@ -700,6 +986,8 @@ window.OpsBot = (() => {
         if (it === "ticket_query" || it === "ticket_create" || it === "onboard") return 0;
         // 中途上报大面积故障：必须立刻让位给工单直达，不允许继续走决策树
         if (isBlast(text)) return 0;
+        // 知识库操作与安全事件也不该被困在决策树里
+        if (it === "knowledge" || /勒索|病毒|钓鱼|泄密|攻击|异常登录/.test(normalize(text))) return 0;
         return 1.0;
       }
       if (detectIntent(text) === "diag") return 0.97;   // 用户显式要求诊断，优先于 FAQ 直答
@@ -866,14 +1154,25 @@ window.OpsBot = (() => {
   function ticketBlast(text, ctx) {
     const title = buildTicketTitle(text, ctx);
     const out = ticketCreate(text, { session: ctx.session, pendingTitle: title });
-    if (!out || !out.cards || !out.cards[0] || out.cards[0].type !== "ticket") return out;
+    if (!out || !out.cards || !out.cards[0] || out.cards[0].type !== "ticket") {
+      // 开单失败（如主系统未就绪）也必须完成原则 4 的紧急告知，不能连电话都没有
+      const fallback = out || { level: "ticket", text: "已识别为**大面积影响**的故障，但本次未能自动开单。", cards: [], options: [], sources: [] };
+      fallback.level = "ticket";
+      fallback.text = "⚠️ 识别到**大面积影响**的故障。\n\n" + hotlineLine("请立即致电并声明「P1 生产故障」") +
+        "\n\n" + (out && out.text ? out.text + "\n\n" : "本次未能自动创建工单，请通过电话或「事件管理」手动提单。\n\n") +
+        "请尽快同步影响范围与已尝试的操作，应急值守会立即介入。";
+      fallback.cards = [{ type: "blast", title: title, pri: "P1", ticketId: null, phone: DUTY_PHONE }].concat(fallback.cards || []);
+      fallback.options = (fallback.options && fallback.options.length) ? fallback.options : [{ label: "🎫 手动建单", value: "__ticket__" }];
+      return fallback;
+    }
     const tk = out.cards[0].ticket;
     tk.priority = "P1";
     out.cards[0].response = SLA_RESPONSE.P1;
     out.cards[0].resolve = SLA_RESOLVE.P1;
     out.cards[0].owner = SLA_OWNER.P1;
-    out.cards.unshift({ type: "blast", title: title, pri: "P1", ticketId: tk.id });
+    out.cards.unshift({ type: "blast", title: title, pri: "P1", ticketId: tk.id, phone: DUTY_PHONE });
     out.text = "⚠️ 识别到**大面积影响**的故障，已跳过自助排查与逐步诊断，**直达人工**并按 **P1 紧急** 立即开单。\n\n" +
+      hotlineLine("请同步致电并声明「P1 生产故障」") + "\n\n" +
       out.text
         .replace(/优先级：P\d（自动按影响面判定）/, "优先级：P1（大面积影响，自动升级）")
         .replace(/响应时限：[^｜]*｜解决时限：[^\n]*/, "响应时限：" + SLA_RESPONSE.P1 + "｜解决时限：" + SLA_RESOLVE.P1) +
@@ -881,8 +1180,7 @@ window.OpsBot = (() => {
     if (window.OpsDesk) {
       const inc = mainState().incidents.find((x) => x.id === tk.id);
       if (inc) { inc.priority = "P1"; inc.blast = true; window.OpsDesk.save(); window.OpsDesk.refresh(); }
-    }
-    logTool("ticket", "blast_escalate", { query: text, matched: P1_BLAST.filter((w) => normalize(text).indexOf(w) >= 0) },
+    }    logTool("ticket", "blast_escalate", { query: text, matched: P1_BLAST.filter((w) => normalize(text).indexOf(w) >= 0) },
       { ticketId: tk.id, priority: "P1", sla: SLA_RESPONSE.P1 + " / " + SLA_RESOLVE.P1 }, "ok", 0);
     return out;
   }
@@ -929,14 +1227,16 @@ window.OpsBot = (() => {
     }
     ctx.session.resolution.level = "ticket";
     ctx.session.resolution.ticketId = id;
+    // 紧急场景（P1）按原则 4 强制附带值班电话
+    const hot = pri === "P1" ? "\n\n" + hotlineLine("已按 P1 建单，请同时致电以确保即时响应") : "";
     return {
       level: "ticket",
       text: "已为你创建工单 **" + id + "**：**" + title + "**\n\n" +
         "• 分类：" + cat + "\n• 优先级：" + pri + "（自动按影响面判定）\n" +
         "• 响应时限：" + SLA_RESPONSE[pri] + "｜解决时限：" + SLA_RESOLVE[pri] + "\n" +
         "• 处理方：" + SLA_OWNER[pri] + "\n\n" +
-        "SLA 分级说明：" + slaTableText(pri) + "\n\n你可以在「事件管理」中查看该工单的 SLA 倒计时。",
-      cards: [{ type: "ticket", ticket: inc, response: SLA_RESPONSE[pri], resolve: SLA_RESOLVE[pri], owner: SLA_OWNER[pri] }],
+        "SLA 分级说明：" + slaTableText(pri) + "\n\n你可以在「事件管理」中查看该工单的 SLA 倒计时。" + hot,
+      cards: [{ type: "ticket", ticket: inc, response: SLA_RESPONSE[pri], resolve: SLA_RESOLVE[pri], owner: SLA_OWNER[pri], phone: pri === "P1" ? DUTY_PHONE : "" }],
       options: [
         { label: "查看我的工单", value: "__ticketlist__" },
         { label: "继续咨询其他问题", value: "__reset__" },
@@ -1041,7 +1341,80 @@ window.OpsBot = (() => {
     },
   };
 
-  const PLUGINS = [onboardPlugin, ticketPlugin, diagPlugin, faqPlugin, ragPlugin];
+  /* ---------- 插件 6：知识库学习（KB 联动与沉淀） ---------- */
+  const kbPlugin = {
+    id: "kb", name: "知识库学习", icon: "📚",
+    desc: "与主系统 KB 双向联动：学习新文章、沉淀已验证方案",
+    canHandle(text, ctx) {
+      const s = normalize(text);
+      const it = detectIntent(text);
+
+      if (it === "knowledge") {
+        const kbHit = !!(ctx.search && ctx.search.kbTop &&
+          ctx.search.kbTop.detail && (ctx.search.kbTop.detail.phrase || 0) >= 0.6);
+        // 例外 1：显式诊断意图优先——
+        // 用户真正要的是排查过程时应走决策树，不被知识库管理动作截胡。
+        if (/诊断|排查|一步步|逐步|定位原因|帮我查原因|检测流程/.test(s)) return 0;
+        // 例外 2：KB 文章强命中时让位给答案——
+        // 若知识库里已有现成文章直答（且非仅靠散词拼凑），比展示"我学到了什么"更有价值。
+        // 注意只对 KB 命中让步，FAQ 命中不参与：FAQ 语料本身含「排查」类标题，
+        // 否则「帮我诊断打印机故障」会被 FAQ 抢答，显式诊断意图形同虚设。
+        if (kbHit) return 0;
+        if (/沉淀|收录|写进知识库|写入知识库|存到知识库|存进知识库|记录到知识库|保存到知识库/.test(s)) return 0.97;
+        if (/同步知识|学习新知识|学习知识|更新知识|重学|refresh.*知识|知识库.*同步|同步.*知识库/.test(s)) return 0.96;
+        if (/我的知识|知识规模|学到什么|会什么|知识库.*多少|有多少.*知识/.test(s)) return 0.94;
+      }
+      // 兜底：不含「知识库」字样时仍允许通过状态类问法进入
+      if (/学到什么|我的知识|知识规模|学到哪些/.test(s)) return 0.94;
+      return 0;
+    },
+    handle(text, ctx) {
+      const s = normalize(text);
+      // 风险卡统一由 ask() 前置插入，此处不再重复
+      // 沉淀
+      if (/沉淀|收录|写进知识库|写入知识库|存到知识库|存进知识库|记录到知识库|保存到知识库/.test(s)) {
+        const r = distillSession(ctx.session.id);
+        return {
+          level: "self",
+          text: r.ok
+            ? "📚 已" + (r.action === "created" ? "新建" : "更新") + "知识库文章 **" + r.id + "**：**" + r.title + "**\n\n" +
+              "已即时纳入检索索引，下次同类提问会直接命中。可在「知识库 (KB)」查看编辑。"
+            : "暂时无法沉淀：**" + r.reason + "**\n\n可以先和我解决一个问题（命中 FAQ 或诊断出结论），再让我把它沉淀成文章。",
+          cards: (r.ok ? [{ type: "learned", id: r.id, title: r.title, action: r.action }] : []),
+          options: [{ label: "查看知识库", value: "__goto_kb__" }, { label: "继续咨询", value: "__reset__" }],
+          sources: r.ok ? [{ id: r.id, type: "KB", title: r.title, score: 1 }] : [],
+        };
+      }
+      // 同步新知
+      if (/同步知识|学习新知识|学习知识|更新知识|重学|知识库.*同步|同步.*知识库/.test(s)) {
+        const r = syncKnowledge();
+        const list = r.learned.slice(0, 6).map((x) => "• " + x.id + "　" + x.title).join("\n");
+        return {
+          level: "self",
+          text: r.added
+            ? "🔄 已学习 **" + r.added + "** 篇新增/更新的知识库文章：\n\n" + list + "\n\n索引规模 **" + r.indexed + "** 条，后续同类提问会命中这些文章。"
+            : "🔄 知识库已是最新，没有待学习的新文章。\n\n当前可检索知识 **" + r.indexed + "** 条（KB " + r.kb + " 篇 ＋ FAQ " + FAQS.length + " 条）。",
+          cards: [{ type: "learnStatus", status: learnStatus() }],
+          options: [{ label: "查看知识库", value: "__goto_kb__" }, { label: "继续咨询", value: "__reset__" }],
+          sources: [],
+        };
+      }
+      // 知识规模
+      const st = learnStatus();
+      return {
+        level: "self",
+        text: "我当前的知识规模：\n\n• **KB 运维文章 " + st.kbTotal + " 篇**（来自「知识库」模块，可随时新增）\n" +
+          "• **FAQ " + st.faqTotal + " 条**（内置高频问题）\n" +
+          "• 合计可检索知识 **" + st.indexedDocs + " 条**\n\n" +
+          (st.pendingCount ? "⚠️ 有 **" + st.pendingCount + "** 篇 KB 文章尚未纳入索引，说「同步知识」即可学习。" : "✅ 知识库已全部纳入索引。"),
+        cards: [{ type: "learnStatus", status: st }],
+        options: [{ label: "🔄 同步知识库", value: "__sync_kb__" }, { label: "查看知识库", value: "__goto_kb__" }],
+        sources: [],
+      };
+    },
+  };
+
+  const PLUGINS = [onboardPlugin, ticketPlugin, kbPlugin, diagPlugin, faqPlugin, ragPlugin];
 
   /* ============================================================
      10. 分级服务编排器
@@ -1051,7 +1424,21 @@ window.OpsBot = (() => {
     const scored = PLUGINS.map((p) => ({ p, score: p.canHandle(text, ctx) }))
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score);
-    return scored.length ? scored[0] : { p: ragPlugin, score: 0.3 };
+    if (!scored.length) return { p: ragPlugin, score: 0.3 };
+    // 高置信知识命中优先于「泛诊断意图」：
+    // KB 标题常含「排查 / 诊断 / 定位」（如《订单服务响应慢排查手册》），
+    // 会误触发 diag 的显式诊断意图，把已经命中的答案让给决策树。有现成答案时不该走诊断。
+    const diag0 = scored.find((x) => x.p.id === "diag");
+    const know0 = scored.find((x) => x.p.id === "faq" || x.p.id === "rag");
+    // 仅当命中来自 KB 且证据确凿（精确短语）时，才允许用答案覆盖「显式诊断意图」。
+    // 不能放宽到所有 high 命中：FAQ 标题里也有「排查 / 定位」类词，
+    // 「帮我诊断打印机故障」会被 FAQ31 抢答，用户明确的诊断诉求就失效了。
+    if (diag0 && know0 && ctx.search && ctx.search.level === "high" && ctx.search.kbTop) {
+      const kt = ctx.search.kbTop;
+      const exact = (kt.detail && (kt.detail.phrase || 0) >= 0.6) || (kt.cov || 0) >= 0.75;
+      if (exact && kt.score >= (diag0.score - 0.08)) return scored.find((x) => x.p.id === know0.p.id) || know0;
+    }
+    return scored[0];
   }
 
   /** 主入口：处理一条用户输入，返回机器人回复结构并落库 */
@@ -1067,6 +1454,19 @@ window.OpsBot = (() => {
       { level: search.level, top: search.hits[0] ? search.hits[0].id : null, score: search.hits[0] ? +search.hits[0].score.toFixed(3) : 0, expansions: search.expansions.groups },
       "ok", Date.now() - t0);
 
+    // 服务原则护栏：在检索结果被当作答案输出之前先过闸
+    const gate = applyGuards(text, ctx, search);
+    if (gate && gate.type && gate.out) {
+      logTool("engine", "guard_" + gate.type, { query: text, matched: gate.matched || [] },
+        { action: gate.action, note: gate.note || "" }, "ok", Date.now() - t0);
+      return commit("engine", gate.out, search, gate);
+    }
+    if (gate && gate.risk) ctx.risk = gate.risk;   // 风险提醒已挂到 ctx，由插件在答复前插入
+    if (gate && gate.type === "risk_warn") {       // 风险类输入记一条审计，但不阻断
+      logTool("engine", "guard_risk_warn", { query: text, matched: gate.matched || [] },
+        { action: gate.action, topic: gate.risk.topic, level: gate.risk.level }, "ok", Date.now() - t0);
+    }
+
     const r = route(text, ctx);
     // 用户切换到其它插件时，自动结束挂起的诊断流程（留审计痕迹）
     if (session.flow && session.flow.active && r.p.id !== "diag") {
@@ -1077,20 +1477,195 @@ window.OpsBot = (() => {
     const tr = callTool(r.p.id, "handle", { query: text, intent: detectIntent(text) }, () => r.p.handle(text, ctx));
     const out = tr.out || { level: "ticket", text: "处理出现异常，已记录审计日志。", cards: [], options: [{ label: "转人工工单", value: "__ticket__" }], sources: [] };
 
-    // 解决结果落库
-    if (out.level === "self" && !session.resolution.level) session.resolution.level = "self";
+    // 原则 5：低置信度不得输出猜测答案，改为明确"需要人工确认"
+    // 但若已识别为高危动作（原则 3），风险警示优先——它比通用拒答更有价值
+    const lowConf = shouldRefuse(out, search, r.p.id);
+    if (lowConf) {
+      logTool("engine", "guard_lowconf", { query: text, score: search.hits[0] ? +search.hits[0].score.toFixed(3) : 0, level: search.level },
+        { action: "refuse_and_escalate", picked: search.hits[0] ? search.hits[0].id : null }, "ok", 0);
+      if (ctx.risk) {
+        // 高危动作：以风险警示为主体，拒答话术降为说明，不再展示无关的"最接近条目"
+        lowConf.text = "⚠️ **请注意：你描述的操作涉及数据安全风险，我不能直接给出操作指引。**\n\n" +
+          "而且我在知识库中没有找到可安全套用的现成方案，**这个问题需要人工确认**。\n\n" +
+          "📞 如需即时支持，可致电 IT 值班热线 **" + DUTY_PHONE + "**。";
+        lowConf.cards = riskCard(ctx.risk);
+        lowConf.options = [
+          { label: "🎫 转人工工单", value: "__ticket__" },
+          { label: "🧭 带我逐步诊断", value: "__diag__" },
+        ];
+        return commit("engine", lowConf, search, { type: "risk_warn", matched: ctx.risk.matched });
+      }
+      return commit("engine", lowConf, search, { type: "lowconf", matched: [] });
+    }
+    if (ctx.risk) out.cards = riskCard(ctx.risk).concat(out.cards || []);
+    if (ctx.risk) out.text = riskLead(ctx.risk) + out.text;
+    // 原则 4：安全事件 / 紧急问题，无论走哪个插件都要带上值班电话
+    ensureHotline(out, text);
+
+    return commit(r.p.id, out, search, { type: null });
+  }
+
+  /** 统一的落库 + 消息推送（护栏命中与插件正常返回共用，保证审计字段一致） */
+  function commit(pluginId, out, search, gate) {
+    const session = cur();
+    const p = PLUGINS.find((x) => x.id === pluginId) || { id: pluginId, name: pluginNameOf(pluginId) };
+    if (out.level === "self" && session.resolution.level !== "ticket") session.resolution.level = "self";
     if (out.level === "diagnose" && session.resolution.level !== "ticket") session.resolution.level = "diagnose";
     session.resolution.resolved = session.resolution.resolved || null;
-    if (!/结束/.test(text)) save();
-
+    save();
+    const hitScore = (search && search.hits && search.hits[0]) ? +search.hits[0].score.toFixed(3) : 0;
     const msg = pushMsg("bot", out.text, {
-      plugin: r.p.id, pluginName: r.p.name, level: out.level,
-      confidence: search.hits[0] ? +search.hits[0].score.toFixed(3) : 0,
+      plugin: p.id, pluginName: p.name, level: out.level,
+      confidence: hitScore,
       cards: out.cards || [], options: out.options || [],
       sources: out.sources || [], keepFlow: !!out.keepFlow,
       audit: { tokens: search.tokens, expansions: search.expansions.extra.slice(0, 12), level: search.level, margin: search.margin, polarity: search.polarity },
+      guard: (gate && gate.type) || null,
     });
-    return { message: msg, plugin: r.p, result: out, search };
+    return { message: msg, plugin: p, result: out, search };
+  }
+  function pluginNameOf(id) {
+    const m = (PLUGIN_META || []).find((x) => x.id === id);
+    return m ? m.name : "服务编排";
+  }
+
+  /* 原则 3：风险警示卡（插入到任何答复之前） */
+  function riskCard(risk) {
+    return [{ type: "risk", level: risk.level, topic: risk.topic, warn: risk.warn, path: risk.path, phone: risk.level === "P1" ? DUTY_PHONE : "" }];
+  }
+  /** 风险提示的一句话前言，放在正文最前面，避免用户只看答案不看卡片 */
+  function riskLead(risk) {
+    return "⚠️ **风险提示：**" + risk.topic + " 属受管操作，以下信息仅供参考，**不得直接执行**。\n\n";
+  }
+
+  /**
+   * 前置护栏：返回 { type, out }（命中即直接作答并跳过插件）
+   * 优先级：域外边界 > 危险动作 > 寒暄 > 过泛澄清
+   * 危险动作不直接作答，而是标记 risk 交给插件继续处理（保留可用信息 + 前置警示）
+   */
+  function applyGuards(text, ctx, search) {
+    const s = normalize(text);
+
+    // 1) IT 范围之外（原则 5）
+    const oos = outOfScope(text);
+    if (oos) {
+      return {
+        type: "out_of_scope", matched: oos.matched, action: "handoff_" + oos.dept,
+        out: {
+          level: "ticket",
+          text: "抱歉，**这个问题不在我的服务范围内**，我不能给出准确答复，**需要人工确认**。\n\n" +
+            "你问的属于 **" + oos.dept + "** 的职责范畴（我仅覆盖 IT 系统、网络、账号权限与办公设备相关问题）。\n\n" +
+            "建议这样处理：\n1. 通过企业通讯录联系 " + oos.dept + " 对接人；\n" +
+            "2. 若涉及 IT 系统上的权限或账号问题，可让我继续为你处理；\n" +
+            "3. 紧急情况可致电 IT 值班热线 **" + DUTY_PHONE + "**。",
+          cards: [{ type: "boundary", dept: oos.dept, matched: oos.matched, phone: DUTY_PHONE }],
+          options: [
+            { label: "我要问 IT 系统 / 账号问题", value: "__reset__" },
+            { label: "🎫 仍然转人工工单", value: "__ticket__" },
+          ],
+          sources: [],
+        },
+      };
+    }
+
+    // 2) 危险动作（原则 3）—— 不阻断，交由插件补充可用信息，但警示卡强制前置
+    const risk = detectRisk(text);
+    if (risk) return { type: "risk_warn", matched: risk.matched, risk, action: "prepend_risk_card", out: null };
+
+    // 3) 寒暄（原则 1）—— 不是故障，不该甩诊断流程
+    if (GREET_PAT.test(s) || THANKS_PAT.test(s)) {
+      const isThanks = THANKS_PAT.test(s);
+      return {
+        type: "greeting", matched: [], action: "greet",
+        out: {
+          level: "self",
+          text: isThanks
+            ? "不客气 🙂 还有其他问题随时说。如果问题还没解决，可以直接说「转人工」，我帮你按 SLA 建单。"
+            : "你好，我是 IT 智能助手 👋\n\n我会按 **自助排查 → 智能诊断 → 人工工单** 三级流程帮你处理：\n" +
+              "1. 常见问题（密码、网络、邮箱、打印机等）直接给步骤；\n2. 复杂故障带你一问一答定位根因；\n3. 需要人工时按 SLA 自动分级开单。\n\n" +
+              "请直接描述你遇到的情况。⚠️ 紧急问题（大面积故障、安全事件）请立即致电 **" + DUTY_PHONE + "**。",
+          cards: [],
+          options: [
+            { label: "🔑 密码 / 账号问题", value: "__ask__:忘记域账号密码怎么重置" },
+            { label: "📶 网络 / VPN 连不上", value: "__ask__:上不了网怎么办" },
+            { label: "✉️ 邮件收发异常", value: "__ask__:收不到邮件怎么办" },
+            { label: "🧭 帮我逐步诊断故障", value: "__diag__" },
+          ],
+          sources: [],
+        },
+      };
+    }
+
+    // 4) 过泛描述、过短或乱码输入（原则 1）—— 先澄清，不猜 FAQ
+    // 例外：诊断流程进行中时，用户回复的裸序号 / 极短选项（"1"、"亮或闪烁"）属于流程交互，
+    // 不是含糊提问，必须放行给决策树消费，否则用户会被澄清话术困住、无法推进流程。
+    const inFlow = !!(ctx && ctx.flow && ctx.flow.active);
+    const shortAnswer = inFlow && /^[\d\s.、,，]{1,3}$/.test(s);
+    const tooShort = TOO_SHORT(s) || !s;
+    if (!shortAnswer && (VAGUE_PAT.test(s) || tooShort || isGibberish(text))) {
+      const gib = isGibberish(text) && !VAGUE_PAT.test(s);
+      return {
+        type: "clarify", matched: [], action: "ask_clarify",
+        out: {
+          level: "diagnose",
+          text: gib
+            ? "我没看懂你的输入 😅\n\n请用一句话描述遇到的问题，例如「连不上公司 Wi-Fi」「邮箱收不到邮件」「电脑开机很慢」。\n\n告诉我：**哪个设备或系统**、**什么现象**、**多久了**，我就能给出准确的排查步骤。"
+            : (tooShort && !s
+              ? "我没看清你的问题，能再描述一下吗？\n\n请告诉我：**哪个设备或系统**、**什么现象**、**多久了**，这样我能给出准确的排查步骤。"
+              : "为了给你准确的答案，我需要先确认一下具体情况：\n\n你说的是 **" + (normalize(text) || "这个") + "**，具体是下面哪种现象？"),
+          cards: [],
+          options: clarifyOptions(),
+          sources: [],
+        },
+      };
+    }
+
+    return { type: null };
+  }
+
+  /**
+   * 原则 5：是否应当拒答
+   * 仅对"检索驱动型"插件（faq / rag）生效；诊断、工单、入职、知识库属流程型，不受影响
+   * 拒答条件（任一命中）：
+   *   a) 检索定级为 low
+   *   b) 融合分低于作答下限 REFUSE_FLOOR
+   *   c) 中等置信但证据薄弱：无短语命中、且关键 token 覆盖率偏低
+   *      （典型是「客户名单手机号导出」这类含大量语料外词、靠个别 token 蹭到 0.6 的伪命中）
+   */
+  const REFUSE_FLOOR = 0.45;
+  const WEAK_COV = 0.32;      // 关键 token 覆盖率下限
+  function shouldRefuse(out, search, pluginId) {
+    if (pluginId !== "faq" && pluginId !== "rag") return null;
+    if (!out) return null;
+    const top = search.hits[0];
+    const score = top ? top.score : 0;
+    const d = top ? top.detail : null;
+    const phrased = d ? (d.phrase || 0) >= 0.4 : false;
+    const weakEvidence = !!d && !phrased && (top.cov || 0) < WEAK_COV;
+    const low = search.level === "low" || score < REFUSE_FLOOR || weakEvidence;
+    if (!low) return null;
+    const reason = score < REFUSE_FLOOR
+      ? "匹配度过低"
+      : (weakEvidence ? "仅个别关键词命中，缺少实质依据" : "未能确定答案");
+    return {
+      level: "ticket",
+      text: "**这个问题我不确定，需要人工确认。**\n\n" +
+        "我在 IT 知识库中没有找到足够匹配的答案" +
+        (top ? "（最高匹配度仅 " + Math.round(score * 100) + "%，" + reason + "，不足以作为依据）" : "") +
+        "，为避免给你错误信息，我不做猜测。\n\n" +
+        "建议这样处理：\n1. 换个说法再描述一次现象（哪个系统、什么报错、影响范围）；\n" +
+        "2. 让我带你做一次逐步诊断，多数故障能在 3–5 步内定位；\n" +
+        "3. 也可以直接转人工，由工程师处理。\n\n" +
+        (top ? "参考：知识库里最接近的条目是《" + top.faq.q + "》，但**匹配度不足，请勿直接照此操作**。\n\n" : "") +
+        "📞 如需即时支持，可致电 IT 值班热线 **" + DUTY_PHONE + "**。",
+      cards: [{ type: "lowconf", score: score, threshold: REFUSE_FLOOR, reason: reason, closest: top ? { id: top.faq.id, q: top.faq.q, score: top.score } : null, phone: DUTY_PHONE }],
+      options: [
+        { label: "🧭 带我逐步诊断", value: "__diag__" },
+        { label: "🎫 转人工工单", value: "__ticket__" },
+        { label: "🔁 换个说法重新提问", value: "__reset__" },
+      ],
+      sources: [],
+    };
   }
 
   /** 处理选项/动作点击（与自由输入共用审计链路） */
@@ -1146,11 +1721,55 @@ window.OpsBot = (() => {
       session.resolution.level = session.resolution.level || "self";
       session.flow = null;
       save();
+      // 学习闭环：把本次已验证的解决方案沉淀进主系统 KB（同标题自动转更新）
+      const learned = autoLearnOnSolved();
+      const lrn = learned.ok
+        ? "\n\n📚 已把本次解决方案沉淀到 **IT 知识库**（" + learned.id + " · " + (learned.action === "created" ? "新建" : "更新") +
+          "），下次有人问同类问题我会直接命中。"
+        : "";
       return finalize("engine", {
-        level: "self", text: "很好，问题已解决 ✅ 本次服务全程已记录在审计日志中。有其它问题随时问我。",
-        cards: [{ type: "closed", resolution: session.resolution }],
-        options: [{ label: "继续咨询", value: "__reset__" }], sources: [],
+        level: "self",
+        text: "很好，问题已解决 ✅ 本次服务全程已记录在审计日志中。" + lrn + "\n\n有其它问题随时问我。",
+        cards: [{ type: "closed", resolution: session.resolution }]
+          .concat(learned.ok ? [{ type: "learned", id: learned.id, title: learned.title, action: learned.action }] : []),
+        options: [{ label: "继续咨询", value: "__reset__" }, { label: "查看知识库", value: "__goto_kb__" }], sources: [],
       });
+    }
+    /* 手动沉淀：把当前会话最近一条解决方案写成 KB 文章 */
+    if (value === "__learn__") {
+      const r = distillSession(session.id);
+      if (!r.ok) {
+        return finalize("kb", { level: "self", text: "暂时无法沉淀：" + r.reason, cards: [], options: [{ label: "继续咨询", value: "__reset__" }], sources: [] });
+      }
+      return finalize("kb", {
+        level: "self",
+        text: "📚 已" + (r.action === "created" ? "新建" : "更新") + "知识库文章 **" + r.id + "**：**" + r.title + "**\n\n" +
+          "该文章已**立即纳入我的检索索引**，后续同类提问会命中它并给出这个答案。你可以在「知识库 (KB)」页面查看与编辑。",
+        cards: [{ type: "learned", id: r.id, title: r.title, action: r.action }],
+        options: [{ label: "查看知识库", value: "__goto_kb__" }, { label: "继续咨询", value: "__reset__" }], sources: [],
+      });
+    }
+    /* 手动同步：把主系统 KB 的新增/修改文章拉进索引 */
+    if (value === "__sync_kb__") {
+      const r = syncKnowledge();
+      const list = r.learned.slice(0, 5).map((x) => "• " + x.id + " " + x.title).join("\n");
+      return finalize("kb", {
+        level: "self",
+        text: (r.added
+          ? "🔄 已学习 **" + r.added + "** 篇知识库文章，索引规模 " + r.indexed + " 条。\n\n" + list
+          : "🔄 知识库已是最新状态，无需同步。\n\n") +
+          "\n当前知识规模：**" + r.kb + "** 篇 KB 文章 ＋ **" + FAQS.length + "** 条 FAQ ＝ **" + r.indexed + "** 条可检索知识。",
+        cards: [{ type: "learnStatus", status: learnStatus() }],
+        options: [{ label: "查看知识库", value: "__goto_kb__" }, { label: "继续咨询", value: "__reset__" }], sources: [],
+      });
+    }
+    if (value === "__goto_kb__") {
+      if (window.OpsDesk) window.OpsDesk.switchPage("kb");
+      return finalize("kb", { level: "self", text: "已为你跳转到「知识库 (KB)」页面。", cards: [], options: [{ label: "返回助手", value: "__back_bot__" }], sources: [] });
+    }
+    if (value === "__back_bot__") {
+      if (window.OpsDesk) window.OpsDesk.switchPage("assistant");
+      return finalize("kb", { level: "self", text: "已返回 IT 智能助手。", cards: [], options: [{ label: "继续咨询", value: "__reset__" }], sources: [] });
     }
     if (value === "__ticketlist__" || value === "__ticketlist_high__") {
       const st = mainState();
@@ -1316,6 +1935,130 @@ window.OpsBot = (() => {
 
   function ensureInit() {
     if (!load()) seedDemo();
+    // 索引必须在主系统 KB 就绪后构建（含 KB 文章），此处为兜底
+    rebuildIndex(true);
+  }
+
+  /* ============================================================
+     11.5 知识学习闭环
+     KB 文章 → 索引 → 命中作答；并支持把已验证的解决方案写回主系统 KB
+     ============================================================ */
+
+  /** 学习状态：新文章如何进入索引、当前知识规模 */
+  function learnStatus() {
+    const kb = (mainState().kb || []).filter((a) => a && a.title && a.content);
+    const snapshot = {};
+    KB_SNAPSHOT.forEach((k) => { snapshot[k.id] = k.fp; });
+    const pending = kb.filter((a) => snapshot[a.id] !== String(a.updatedAt || "") + "|" + a.title.length + "|" + a.content.length);
+    return {
+      kbTotal: kb.length,
+      indexedDocs: DOCS.length,
+      faqTotal: FAQS.length,
+      pendingCount: pending.length,
+      pending: pending.map((a) => ({ id: a.id, title: a.title })),
+      lastSyncAt: store.lastKbSync || null,
+    };
+  }
+
+  /** 增量同步：把主系统 KB 的新增/修改文章纳入检索索引 */
+  function syncKnowledge() {
+    const before = DOCS.length;
+    const r = rebuildIndex(true);
+    store.lastKbSync = nowISO();
+    save();
+    logTool("kb", "learn_sync", { trigger: "manual", pendingBefore: r.learned.length },
+      { indexed: r.docs, kb: r.kb, added: r.learned.length, before: before }, "ok", 0);
+    return { added: r.learned.length, learned: r.learned, indexed: r.docs, kb: r.kb };
+  }
+
+  /** 把一条已验证的解决方案沉淀进主系统 KB（学习闭环的写入侧）
+      来源：会话中「已解决」的 FAQ/KB 命中、诊断结论、或用户显式要求 */
+  function teachToKB(opts) {
+    const o = opts || {};
+    const st = mainState();
+    if (!window.OpsDesk || !st.kb) return { ok: false, reason: "主系统知识库未就绪" };
+    const title = String(o.title || "").trim();
+    const content = String(o.content || "").trim();
+    if (!title || !content) return { ok: false, reason: "标题与内容不能为空" };
+    // 去重：标题完全相同则视为重复，改为更新
+    const dup = st.kb.find((a) => a && String(a.title).trim() === title);
+    const payload = {
+      title: title,
+      category: o.category || "应用",
+      tags: (o.tags || []).slice(0, 8),
+      ciId: o.ciId || null,
+      content: content,
+    };
+    if (dup) {
+      Object.assign(dup, payload, { updatedAt: nowISO() });
+      window.OpsDesk.save();
+      rebuildIndex(true);
+      logTool("kb", "learn_update", { id: dup.id, title: title, from: o.from || "bot" }, { result: "updated" }, "ok", 0);
+      return { ok: true, action: "updated", id: dup.id, title: title };
+    }
+    const id = nextKbId(st);
+    st.kb.unshift(Object.assign({
+      id: id, views: 0, createdAt: nowISO(), updatedAt: nowISO(), source: o.from || "bot",
+      sourceSession: o.sessionId || null,
+    }, payload));
+    window.OpsDesk.save();
+    rebuildIndex(true);
+    logTool("kb", "learn_add", { id: id, title: title, from: o.from || "bot", tags: payload.tags },
+      { result: "created", indexed: DOCS.length }, "ok", 0);
+    return { ok: true, action: "created", id: id, title: title };
+  }
+  function nextKbId(st) {
+    let n = 1000;
+    (st.kb || []).forEach((a) => {
+      const m = String(a.id || "").match(/^KB(\d+)$/);
+      if (m) n = Math.max(n, parseInt(m[1], 10));
+    });
+    return "KB" + (n + 1);
+  }
+
+  /** 从当前会话沉淀知识：把最近一次成功的 FAQ / KB / 诊断结论写成 KB 文章 */
+  function distillSession(sessionId) {
+    const s = sessionId ? store.sessions.find((x) => x.id === sessionId) : cur();
+    if (!s) return { ok: false, reason: "会话不存在" };
+    // 找该会话里最后一条带 FAQ/KB 卡片或诊断结论的助手消息
+    let pick = null;
+    for (let i = s.messages.length - 1; i >= 0; i--) {
+      const m = s.messages[i];
+      if (m.role !== "bot" || !m.cards) continue;
+      const c = m.cards.find((x) => x.type === "faq" || x.type === "kbAnswer" || x.type === "result");
+      if (c) { pick = { msg: m, card: c }; break; }
+    }
+    if (!pick) return { ok: false, reason: "本会话暂无可沉淀的解决方案（先解决一个问题再沉淀）" };
+    const c = pick.card;
+    let title = "", content = "", tags = [], category = "应用";
+    if (c.type === "faq") {
+      title = c.faq.q;
+      content = [c.faq.a].concat((c.faq.steps || []).map((x, i) => (i + 1) + ". " + x)).join("\n");
+      tags = c.faq.tags || [];
+      category = c.faq.cat || "应用";
+    } else if (c.type === "kbAnswer") {
+      title = c.title;
+      content = [c.content].concat((c.steps || []).map((x, i) => (i + 1) + ". " + x)).join("\n");
+      tags = c.tags || [];
+      category = c.cat || "应用";
+    } else {
+      title = pick.msg.text.replace(/[*#]/g, "").split("\n")[0].slice(0, 40);
+      content = pick.msg.text.replace(/[*#]/g, "");
+      tags = ["诊断结论"];
+    }
+    const r = teachToKB({ title: title, content: content, tags: tags, category: category, from: "session_distill", sessionId: s.id });
+    if (r.ok) {
+      s.resolution.knowledgeId = r.id;
+      save();
+    }
+    return r;
+  }
+
+  /** 会话闭环时把「已解决」的经验自动沉淀（由 __solved__ 触发，可选自动） */
+  function autoLearnOnSolved() {
+    const s = cur();
+    if (s.resolution.knowledgeId) return { ok: false, reason: "本会话已沉淀过" };
+    return distillSession(s.id);
   }
 
   /* ============ 引擎对外 API（UI 层再挂载 render 等方法） ============ */
@@ -1324,13 +2067,20 @@ window.OpsBot = (() => {
     get store() { return store; },
     save, load, cur, newSession, closeSession, pushMsg, logTool, callTool, summarize,
     // 检索
-    tokenize, normalize, expandQuery, hybridSearch, evaluate, scoreText, searchKB, searchIncidents,
+    tokenize, normalize, expandQuery, hybridSearch, evaluate, evaluateGuards, scoreText, searchKB, searchIncidents,
     // 编排与插件
     ask, act, route, stats, PLUGINS, PLUGIN_META, mainState,
-    faqPlugin, ragPlugin, diagPlugin, ticketPlugin, onboardPlugin,
+    faqPlugin, ragPlugin, diagPlugin, ticketPlugin, onboardPlugin, kbPlugin,
     recommendFlow, getFlow, onboardStats, seedDemo, ensureInit,
+    // 知识库学习闭环
+    rebuildIndex, syncKnowledge, learnStatus, teachToKB, distillSession, autoLearnOnSolved,
+    kbToFaq, get documents() { return DOCS; }, get kbSnapshot() { return KB_SNAPSHOT; },
+    // 服务原则护栏（供测试与审计）
+    applyGuards, shouldRefuse, outOfScope, detectRisk, hotlineLine,
+    DUTY_PHONE, DESK_EXT, REFUSE_FLOOR, RISK_RULES, OUT_OF_SCOPE,
     // 常量
     FAQS, FLOWS, ONBOARD, EVAL_SET, SYNONYMS,
+    get GUARD_SET() { return DATA.GUARD_SET || []; },
     SLA_RESPONSE, SLA_RESOLVE, SLA_OWNER, CONF, W,
     // 工具
     uid, nowISO, fmtTime, detectIntent, inferCategory, inferPriority, slaTableText,
