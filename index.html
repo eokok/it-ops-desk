@@ -27,6 +27,9 @@
       <div class="nav-item" data-page="kb"><span class="ico">❏</span> 知识库 (KB)</div>
       <div class="nav-item" data-page="requests"><span class="ico">✉</span> 请求 (Request)</div>
       <div class="nav-item" data-page="changes"><span class="ico">⇄</span> 变更 (Change)</div>
+      <div class="group-label">智能服务</div>
+      <div class="nav-item" data-page="assistant"><span class="ico">🤖</span> IT 智能助手</div>
+      <div class="nav-item" data-page="audit"><span class="ico">🕘</span> 审计与回放</div>
       <div class="group-label">系统</div>
       <div class="nav-item" data-action="reset"><span class="ico">⟳</span> 重置演示数据</div>
     </nav>
@@ -74,6 +77,28 @@
         <div class="card" style="margin-top:16px">
           <div class="card-header"><h3>SLA 逾期工单</h3></div>
           <div class="card-body" id="slaList"></div>
+        </div>
+
+        <!-- IT 智能助手 · 服务效能（由 bot-ui.js 渲染） -->
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>IT 智能助手 · 服务效能</h3>
+            <button class="btn sm" onclick="window.OpsDesk && window.OpsDesk.switchPage('assistant')">打开助手 →</button>
+          </div>
+          <div class="card-body">
+            <div class="stat-grid" id="botDashStats"></div>
+            <div class="grid-2b" style="margin-top:16px">
+              <div>
+                <div class="bot-side-title">插件调用分布</div>
+                <div class="chart-wrap sm"><canvas id="botChartPlugin"></canvas></div>
+              </div>
+              <div>
+                <div class="bot-side-title">最近助手会话</div>
+                <div id="botRecent"></div>
+              </div>
+            </div>
+            <div id="botEvalBox" class="beval" style="margin-top:16px"></div>
+          </div>
         </div>
       </section>
 
@@ -216,6 +241,119 @@
         </div>
       </section>
 
+      <!-- ===== AI Assistant ===== -->
+      <section class="page" id="page-assistant">
+        <div class="bot-shell">
+          <aside class="bot-side">
+            <div class="bot-side-block">
+              <div class="bot-side-title">核心插件</div>
+              <div class="bot-plugins" id="botPlugins"></div>
+            </div>
+            <div class="bot-side-block">
+              <div class="bot-side-title">分级服务流程</div>
+              <div class="bot-tiers" id="botTiers"></div>
+            </div>
+            <div class="bot-side-block">
+              <div class="bot-side-title">SLA 分级响应</div>
+              <table class="bot-sla" id="botSla"></table>
+            </div>
+          </aside>
+          <div class="bot-main">
+            <div class="card bot-card">
+              <div class="bot-head">
+                <div class="bot-head-l">
+                  <div class="bot-avatar">🤖</div>
+                  <div>
+                    <div class="bot-name">IT 智能助手 <span class="bot-dot"></span></div>
+                    <div class="bot-sub" id="botSub"></div>
+                  </div>
+                </div>
+                <div class="bot-head-r">
+                  <span id="botLevelChip"></span>
+                  <button class="btn sm" id="botNew">＋ 新建会话</button>
+                  <button class="btn sm" id="botClose">结束会话</button>
+                </div>
+              </div>
+              <div class="bot-stream" id="botStream"></div>
+              <div class="bot-quick" id="botQuick"></div>
+              <div class="bot-inputbar">
+                <input type="text" id="botInput" placeholder="描述你的问题，例如：在家连 VPN 连不上…">
+                <button class="btn primary" id="botSend">发送</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== Audit & Replay ===== -->
+      <section class="page" id="page-audit">
+        <div class="stat-grid" id="auditStats"></div>
+        <div class="card">
+          <div class="card-header"><h3>会话审计</h3><span id="auditCount"></span></div>
+          <div class="card-body">
+            <div class="toolbar">
+              <div class="search">
+                <span>🔍</span>
+                <input type="text" id="audSearch" placeholder="搜索会话编号 / 问题 / 工单号 / 插件">
+              </div>
+              <select id="audPlugin"></select>
+              <select id="audResult">
+                <option value="">全部结果</option>
+                <option value="self">自助解决</option>
+                <option value="diagnose">智能诊断</option>
+                <option value="ticket">转人工工单</option>
+                <option value="open">未产生结论</option>
+              </select>
+              <select id="audRange">
+                <option value="">全部时间</option>
+                <option value="24h">近 24 小时</option>
+                <option value="7d">近 7 天</option>
+                <option value="30d">近 30 天</option>
+              </select>
+              <button class="btn" id="audExportXlsx">⬇ 导出审计 Excel</button>
+              <button class="btn" id="audExportJson">⬇ 导出 JSON</button>
+              <button class="btn danger" id="audClear">清空审计数据</button>
+            </div>
+            <div style="overflow-x:auto"><table>
+              <thead><tr>
+                <th>会话编号</th><th>开始时间</th><th>用户 / 渠道</th><th>消息</th><th>工具调用</th>
+                <th>服务层级</th><th>时长</th><th>涉及插件</th><th>操作</th>
+              </tr></thead>
+              <tbody id="audBody"></tbody>
+            </table></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>故障回放 <span id="audReplayId" class="c-teal"></span></h3>
+            <div class="bot-head-r">
+              <button class="btn sm" id="audPlay">▶ 播放</button>
+              <button class="btn sm" id="audStepBtn">⏭ 单步</button>
+              <button class="btn sm" id="audReset">⟲ 重置</button>
+              <select id="audSpeed">
+                <option value="900">1×</option>
+                <option value="450">2×</option>
+                <option value="180">5×</option>
+              </select>
+            </div>
+          </div>
+          <div class="card-body"><div id="audTimeline" class="aud-timeline"></div></div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="card-header"><h3>工具调用明细</h3><span id="audToolCount"></span></div>
+          <div class="card-body" style="padding:0">
+            <div style="overflow-x:auto"><table>
+              <thead><tr>
+                <th>#</th><th>时间</th><th>插件</th><th>动作</th><th>输入</th><th>输出</th><th>状态 / 耗时</th>
+              </tr></thead>
+              <tbody id="audToolBody"></tbody>
+            </table></div>
+          </div>
+        </div>
+      </section>
+
     </div>
   </div>
 </div>
@@ -235,5 +373,10 @@
 <div class="toast" id="toast"></div>
 
 <script src="app.js"></script>
+<!-- IT 智能助手：知识语料 → 流程与清单 → 检索引擎与插件 → 界面层 -->
+<script src="bot-data.js"></script>
+<script src="bot-flows.js"></script>
+<script src="bot.js"></script>
+<script src="bot-ui.js"></script>
 </body>
 </html>
