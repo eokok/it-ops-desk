@@ -571,6 +571,57 @@ td .num { font-variant-numeric: tabular-nums; }
 .bb-blast { font-size: 12.8px; line-height: 1.65; color: #b91c1c; }
 .bb-blast-t { margin-top: 7px; color: var(--text); }
 
+/* 值班热线（原则 4：紧急问题必须立即告知） */
+.bb-call {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-top: 10px; padding: 9px 12px; border-radius: 8px;
+  background: #fef2f2; border: 1px solid #fecaca;
+}
+.bb-call-l { font-size: 12px; color: #b91c1c; }
+.bb-call-n { font-size: 15px; letter-spacing: .4px; color: #991b1b; }
+.bb-call-s { font-size: 11px; color: #b91c1c; opacity: .8; padding: 1px 6px; border: 1px solid #fca5a5; border-radius: 10px; }
+
+/* 数据安全风险警示（原则 3） */
+.bcard-risk { border-left: 3px solid #d97706; }
+.bcard-risk .bcard-h { background: #fffbeb; border-bottom-color: #fde68a; }
+.bb-risk-topic { font-size: 13px; font-weight: 500; color: #92400e; margin-bottom: 6px; }
+.bb-risk-warn { font-size: 12.8px; line-height: 1.65; color: #b45309; padding: 8px 11px; background: #fffbeb; border-radius: 7px; }
+.bb-risk-warn strong { color: #92400e; }
+.bb-risk-path { margin-top: 9px; font-size: 12.5px; line-height: 1.6; color: var(--text); display: flex; gap: 8px; }
+.bb-risk-path > span:first-child {
+  flex: 0 0 auto; font-size: 11px; color: #15803d; background: #f0fdf4;
+  border: 1px solid #bbf7d0; border-radius: 5px; padding: 1px 6px; height: 18px; line-height: 16px;
+}
+
+/* 超出 IT 服务范围（原则 5） */
+.bcard-boundary { border-left: 3px solid #6b7280; }
+.bcard-boundary .bcard-h { background: #f9fafb; border-bottom-color: #e5e7eb; }
+.bb-kv-line { display: flex; justify-content: space-between; font-size: 12.8px; padding: 4px 0; }
+.bb-kv-line > span { color: var(--text-faint); }
+.bb-note { margin-top: 9px; font-size: 12.3px; line-height: 1.6; color: var(--text-faint); }
+
+/* 低置信拒答（原则 5） */
+.bcard-lowconf { border-left: 3px solid #6b7280; }
+.bcard-lowconf .bcard-h { background: #f9fafb; border-bottom-color: #e5e7eb; }
+.bb-conf { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--text-faint); }
+.bb-conf > b { font-size: 20px; color: #374151; }
+.bb-conf-thr { font-size: 11.5px; color: #9ca3af; }
+.bb-closest { margin-top: 10px; padding: 9px 11px; background: #f9fafb; border: 1px dashed #d1d5db; border-radius: 7px; }
+.bb-closest > span { display: block; font-size: 11.5px; color: var(--text-faint); margin-bottom: 4px; }
+.bb-closest > b { font-size: 12.8px; color: #4b5563; }
+
+/* 知识库来源卡片 */
+.bcard-kb .bcard-h { background: #eef4ff; border-bottom-color: #cddcf8; }
+
+/* 学习闭环卡片 */
+.bcard-learned { border-left: 3px solid #16a34a; }
+.bcard-learned .bcard-h { background: #f0fdf4; border-bottom-color: #bbf7d0; }
+.bb-learned { font-size: 12.8px; line-height: 1.65; }
+.bb-learned > b { color: #15803d; }
+.bcard-learn .bcard-h { background: #f7f9ff; border-bottom-color: #e2e8f7; }
+.bb-pending { margin-top: 4px; }
+.bb-pending-row { font-size: 12.3px; line-height: 1.8; color: var(--text); display: flex; gap: 7px; align-items: center; }
+
 /* 回放事件内的正文与卡片还原 */
 .aur-body > .aur-text { display: block; width: 100%; }
 .aur-body > .aur-cards { display: block; width: 100%; margin-top: 6px; }
