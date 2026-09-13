@@ -191,6 +191,45 @@ NODE_PATH=<node_modules 路径> node probe-rules.js
 
 > `bot-data.js` / `bot-flows.js` / `bot.js` 在 Node 下通过 `require` 直接加载，需要 `global.window`、`localStorage`、`document` 三个桩；索引为惰性构建，`hybridSearch()` 内部会自动兜底重建，不会因未调用 `ensureInit()` 而静默返回空结果。
 
+### 线上站点校验（本地全绿 ≠ 线上可用）
+
+构建产物经 GitHub Pages CDN 分发后，可能出现资源 404、内容错版（CDN 缓存滞后）、脚本加载顺序错乱导致模块未挂载等情况。`verify-live.js` 用无头 Edge + 手写 CDP WebSocket 客户端**直接打开线上真实地址**跑 27 项断言，并输出 `preview-live.png`：
+
+```bash
+# 默认校验 https://eokok.github.io/it-ops-desk/
+node verify-live.js
+
+# 也可指定其它地址
+node verify-live.js http://127.0.0.1:8080/
+
+# 若 msedge.exe 不在默认路径，显式指定
+EDGE="C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" node verify-live.js
+```
+
+覆盖范围：
+
+| 分组 | 断言内容 |
+| --- | --- |
+| 脚本加载 | `OpsDesk` / `OpsBot` / `OpsBot.ui` / `OpsBotData` / `OpsBotFlows` / `Chart` / `XLSX` 全部挂载，助手页可切换 |
+| 语料规模 | FAQ 53 条、EVAL_SET 103 条、GUARD_SET 22 条、决策树 7 条、插件 6 个（元信息与渲染卡片一致） |
+| 护栏 | 数据安全类提问触发风险提醒且含值班电话；大面积故障告知 400-1111-2222 并 P1 升级；域外提问明确不处理 |
+| 学习闭环 | `learnStatus()` / `syncKnowledge()` 可用，索引总量 = FAQ + KB 文章数 |
+| 自助解决 | 命中 FAQ 给出编号步骤 |
+
+> 校验脚本自身也需注意导出形态：UI 层挂在 **`OpsBot.ui`**（不是 `window.OpsBotUI`），`bot-flows.js` 导出的是 **`FLOWS`**（不是 `DECISION_TREES`），`learnStatus()` 返回 `{ kbTotal, indexedDocs, faqTotal, pendingCount, pending, lastSyncAt }`。
+
+### 上传到 GitHub
+
+`upload.py` 走 GitHub Contents API（本机代理放行 `api.github.com`，但封禁 `github.com`，故 `git push` 不可用）。凭据解析顺序：环境变量 `GH_TOKEN` / `GITHUB_TOKEN` → 本机 Git Credential Manager。
+
+```bash
+python upload.py --check          # 只读自检，确认凭据可用
+python upload.py                  # 上传全部文件
+GH_FILES="README.md,bot.js" python upload.py   # 只传指定文件
+```
+
+> 两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
+
 ## 预览
 
 | 智能助手 | 审计与回放 |
@@ -204,6 +243,10 @@ NODE_PATH=<node_modules 路径> node probe-rules.js
 | 服务原则护栏（风险警示 + 值班电话） | 知识库学习闭环（学习状态） |
 | --- | --- |
 | ![护栏](preview-guard.png) | ![学习](preview-learn.png) |
+
+| 线上站点实测（GitHub Pages） |
+| --- |
+| ![线上](preview-live.png) |
 
 ## 说明
 
