@@ -74,6 +74,19 @@ button { font-family: inherit; cursor: pointer; }
 .nav-item.active { background: var(--primary-soft); color: var(--primary); }
 .nav-item .ico { width: 20px; text-align: center; }
 
+/* ---------- 导航拖拽排序 ---------- */
+.nav-item[draggable="true"] { cursor: grab; user-select: none; position: relative; }
+.nav-item[draggable="true"]:active { cursor: grabbing; }
+.nav-item.dragging { opacity: .35; }
+/* 落点提示：目标项上方/下方画一条插入线 */
+.nav-item.drop-before::before,
+.nav-item.drop-after::after {
+  content: ""; position: absolute; left: 8px; right: 8px; height: 2px;
+  background: var(--primary); border-radius: 1px; pointer-events: none;
+}
+.nav-item.drop-before::before { top: -2px; }
+.nav-item.drop-after::after { bottom: -2px; }
+
 .main {
   margin-left: var(--sidebar-w);
   flex: 1; min-width: 0; display: flex; flex-direction: column;
