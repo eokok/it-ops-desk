@@ -28,6 +28,14 @@
   const pct0 = (n) => (n == null ? "–" : Math.round(n * 100) + "%");
   const pct1 = (n) => (n == null ? "–" : (n * 100).toFixed(1) + "%");
   const num = (n) => (n == null ? "–" : Number(n).toLocaleString("zh-CN"));
+  /** 时间戳（ISO 或 ms）→ 「MM-DD HH:mm」，无效值返回占位符 */
+  function timeOf(ts) {
+    if (!ts) return "–";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "–";
+    const p = (n) => String(n).padStart(2, "0");
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
 
   function levelMeta(lv) {
     return ({
@@ -181,6 +189,8 @@
           '</div>' +
           (t.source ? '<div class="bcard-tags"><span class="tag ghost">来源 ' + esc(t.source) + '</span>' +
             '<span class="tag ghost">会话 ' + esc(t.sourceSession || "") + '</span></div>' : "") +
+          (c.phone ? '<div class="bb-call"><span class="bb-call-l">紧急问题立即致电值班热线</span>' +
+            '<b class="bb-call-n">' + esc(c.phone) + '</b><span class="bb-call-s">7×24 值守</span></div>' : "") +
         '</div></div>';
     },
     ticketList(c) {
@@ -249,6 +259,8 @@
         '已跳过自助排查与逐步诊断，按 <b>P1 紧急</b> 立即开单（响应 ' + esc(B.SLA_RESPONSE.P1) + ' / 解决 ' + esc(B.SLA_RESOLVE.P1) +
         '，' + esc(B.SLA_OWNER.P1) + '）。' +
         (c.ticketId ? '<div class="bb-blast-t">工单 <b>' + esc(c.ticketId) + '</b>：' + esc(c.title) + '</div>' : "") +
+        (c.phone ? '<div class="bb-call"><span class="bb-call-l">紧急问题立即致电值班热线</span>' +
+          '<b class="bb-call-n">' + esc(c.phone) + '</b><span class="bb-call-s">7×24 值守</span></div>' : "") +
         '</div></div></div>';
     },
     /* 会话闭环 */
@@ -261,6 +273,95 @@
         '<div><span>用户确认</span><b>' + (r.resolved ? "已解决" : "未标注") + '</b></div>' +
         '<div><span>关联工单</span><b>' + esc(r.ticketId || "无（未转人工）") + '</b></div>' +
         '</div></div></div>';
+    },
+    /* 原则 3：数据安全风险警示（强制前置） */
+    risk(c) {
+      return '<div class="bcard bcard-risk">' +
+        '<div class="bcard-h"><span class="bcard-t">⚠️ 数据安全风险提醒</span>' + priPill(c.level || "P1") + '</div>' +
+        '<div class="bcard-b">' +
+          '<div class="bb-risk-topic">' + esc(c.topic || "高风险操作") + '</div>' +
+          '<div class="bb-risk-warn">' + rich(c.warn || "") + '</div>' +
+          '<div class="bb-risk-path"><span>正确做法</span>' + rich(c.path || "") + '</div>' +
+          (c.phone ? '<div class="bb-call"><span class="bb-call-l">紧急或已造成影响，立即致电值班热线</span>' +
+            '<b class="bb-call-n">' + esc(c.phone) + '</b><span class="bb-call-s">7×24 值守</span></div>' : "") +
+        '</div></div>';
+    },
+    /* 原则 5：IT 服务范围之外 */
+    boundary(c) {
+      return '<div class="bcard bcard-boundary">' +
+        '<div class="bcard-h"><span class="bcard-t">🚧 超出 IT 服务范围</span></div>' +
+        '<div class="bcard-b">' +
+          '<div class="bb-kv-line"><span>归属部门</span><b>' + esc(c.dept || "相关职能部门") + '</b></div>' +
+          (c.matched && c.matched.length
+            ? '<div class="bcard-tags">' + c.matched.map((w) => '<span class="tag ghost">' + esc(w) + '</span>').join("") + '</div>'
+            : "") +
+          '<div class="bb-note">我不做猜测，此问题需要对应部门人工确认。</div>' +
+        '</div></div>';
+    },
+    /* 原则 5：低置信拒答 */
+    lowconf(c) {
+      const pct = Math.round((c.score || 0) * 100);
+      const thr = Math.round((c.threshold || 0.45) * 100);
+      return '<div class="bcard bcard-lowconf">' +
+        '<div class="bcard-h"><span class="bcard-t">🤔 置信度不足 · 未做猜测</span></div>' +
+        '<div class="bcard-b">' +
+          '<div class="bb-conf"><span>本次最高匹配度</span><b>' + pct + '%</b>' +
+          '<span class="bb-conf-thr">低于可作答阈值 ' + thr + '%</span></div>' +
+          (c.closest
+            ? '<div class="bb-closest"><span>最接近的条目（仅供参考，请勿直接照此操作）</span>' +
+              '<b>' + esc(c.closest.q) + '</b></div>'
+            : "") +
+          '<div class="bb-note">为了避免给出错误信息，我需要人工确认后才能答复。</div>' +
+        '</div></div>';
+    },
+    /* KB 命中卡片：与 FAQ 同构，但标注知识库来源与维护信息 */
+    kbAnswer(c) {
+      const steps = c.steps || [];
+      return '<div class="bcard bcard-faq bcard-kb">' +
+        '<div class="bcard-h"><span class="bcard-t">📖 ' + esc(c.title || "") + '</span>' + scoreBar(c.score) + '</div>' +
+        '<div class="bcard-b">' +
+          '<div class="bcard-ans">' + rich(c.content || "") + '</div>' +
+          (steps.length
+            ? '<div class="bcard-steps-h">处置步骤</div><ol class="bcard-steps">' +
+              steps.map((s) => "<li>" + rich(s) + "</li>").join("") + "</ol>"
+            : "") +
+          '<div class="bcard-tags">' +
+            '<span class="tag">知识库</span>' +
+            '<span class="tag">' + esc(c.cat || "未分类") + '</span>' +
+            (c.tags || []).slice(0, 4).map((t) => '<span class="tag ghost">#' + esc(t) + '</span>').join("") +
+            '<span class="tag ghost">' + esc(c.kbId || "") + '</span>' +
+            '<span class="tag ghost">浏览 ' + esc(String(c.views || 0)) + '</span>' +
+          '</div>' +
+        '</div></div>';
+    },
+    /* 学习闭环：已沉淀为知识 */
+    learned(c) {
+      return '<div class="bcard bcard-learned">' +
+        '<div class="bcard-h"><span class="bcard-t">📚 已沉淀到知识库</span>' +
+        '<span class="tag">' + (c.action === "created" ? "新建" : "更新") + '</span></div>' +
+        '<div class="bcard-b"><div class="bb-learned">' +
+          '<b>' + esc(c.id || "") + '</b>　' + esc(c.title || "") +
+          '<div class="bb-note">已纳入检索索引，下次同类提问会直接命中这条知识。</div>' +
+        '</div></div></div>';
+    },
+    /* 知识规模状态 */
+    learnStatus(c) {
+      const s = c.status || {};
+      return '<div class="bcard bcard-learn">' +
+        '<div class="bcard-h"><span class="bcard-t">📚 知识库学习状态</span></div>' +
+        '<div class="bcard-b"><div class="bkv">' +
+          '<div><span>KB 运维文章</span><b>' + esc(String(s.kbTotal || 0)) + ' 篇</b></div>' +
+          '<div><span>内置 FAQ</span><b>' + esc(String(s.faqTotal || 0)) + ' 条</b></div>' +
+          '<div><span>可检索知识</span><b>' + esc(String(s.indexedDocs || 0)) + ' 条</b></div>' +
+          '<div><span>待学习</span><b>' + esc(String(s.pendingCount || 0)) + ' 篇</b></div>' +
+          '<div><span>最近同步</span><b>' + esc(s.lastSyncAt ? timeOf(s.lastSyncAt) : "尚未同步") + '</b></div>' +
+        '</div>' +
+        (s.pending && s.pending.length
+          ? '<div class="bcard-steps-h">待学习文章</div><div class="bb-pending">' +
+            s.pending.slice(0, 6).map((x) => '<div class="bb-pending-row"><span class="tag ghost">' + esc(x.id) + '</span>' + esc(x.title) + '</div>').join("") +
+            '</div>'
+          : '<div class="bb-note">✅ 知识库已全部纳入索引。</div>') +
+        '</div></div>';
     },
   };
 
