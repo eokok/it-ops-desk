@@ -418,6 +418,78 @@ function lastOptions() {
   ok(ev && ev.selfRate >= 0.95, "自助解决率达标 ≥95%", ev && (ev.selfRate * 100).toFixed(1) + "%");
   ok(/超过 FAQ 自助解决率 95%|低于 95% 目标/.test(txt("#botEvalBox")), "评测结论文案已展示");
 
+  console.log("\n=== 11b. 导航拖拽排序 ===");
+  const navOrderNow = () => {
+    const label = $("#nav .group-label");            // 第一组「工作台」
+    const keys = [];
+    let el = label.nextElementSibling;
+    while (el && !el.classList.contains("group-label")) {
+      if (el.classList.contains("nav-item")) keys.push(el.dataset.page || ("action:" + el.dataset.action));
+      el = el.nextElementSibling;
+    }
+    return keys.join(",");
+  };
+  const fireDrag = (type, el, clientY) => {
+    const ev = new window.Event(type, { bubbles: true, cancelable: true });
+    if (clientY !== undefined) Object.defineProperty(ev, "clientY", { value: clientY });
+    el.dispatchEvent(ev);
+  };
+
+  // 基线顺序（jsdom 每次运行都是全新存储，这里再清一次做双保险）
+  window.localStorage.removeItem("opsdesk.navOrder.v1");
+  ok(navOrderNow() === "dashboard,incidents,cmdb,kb,requests,changes", "工作台组初始顺序正确", navOrderNow());
+
+  // 模拟把「知识库 kb」拖到「事件管理 incidents」上方
+  const kbNav = $('.nav-item[data-page="kb"]');
+  const incNav = $('.nav-item[data-page="incidents"]');
+  fireDrag("dragstart", kbNav);
+  ok(kbNav.classList.contains("dragging"), "dragstart 加上 dragging 态");
+  fireDrag("dragover", incNav, -1);                // jsdom 的 rect 全 0，clientY=-1 → 上半部 → 插到前面
+  ok(incNav.classList.contains("drop-before"), "dragover 显示上方插入线");
+  fireDrag("drop", incNav);
+  fireDrag("dragend", kbNav);
+  ok(navOrderNow() === "dashboard,kb,incidents,cmdb,requests,changes", "组内拖拽排序生效", navOrderNow());
+  ok(!kbNav.classList.contains("dragging") && !incNav.classList.contains("drop-before"), "dragend 清理拖拽痕迹");
+
+  // 持久化已写入
+  const savedOrder = JSON.parse(window.localStorage.getItem("opsdesk.navOrder.v1") || "null");
+  ok(Array.isArray(savedOrder) && savedOrder[0] && savedOrder[0].items.join(",") === "dashboard,kb,incidents,cmdb,requests,changes",
+    "排序已持久化到 localStorage", savedOrder && savedOrder[0] && savedOrder[0].items.join(","));
+
+  // 打乱 DOM 后 apply() 能按保存的顺序恢复（把 kb 挪到组尾，确保与保存顺序明显不同）
+  const nav = $("#nav");
+  const g1 = $$("#nav .group-label")[1];             // 「智能服务」组标签 = 工作台组的末尾边界
+  nav.insertBefore(kbNav, g1);
+  ok(navOrderNow() === "dashboard,incidents,cmdb,requests,changes,kb", "（准备）DOM 已被打乱", navOrderNow());
+  window.OpsDesk.navOrder.apply();
+  ok(navOrderNow() === "dashboard,kb,incidents,cmdb,requests,changes", "applyNavOrder 恢复保存的顺序", navOrderNow());
+
+  // 跨组拖拽不生效（工作台 → 智能服务）
+  const dashNav = $('.nav-item[data-page="dashboard"]');
+  const botNav = $('.nav-item[data-page="assistant"]');
+  fireDrag("dragstart", dashNav);
+  fireDrag("dragover", botNav, -1);
+  ok(!botNav.classList.contains("drop-before") && !botNav.classList.contains("drop-after"), "跨组 dragover 不出现插入线");
+  fireDrag("drop", botNav);
+  fireDrag("dragend", dashNav);
+  ok(navOrderNow() === "dashboard,kb,incidents,cmdb,requests,changes", "跨组拖拽不改变顺序", navOrderNow());
+
+  // 重排后点击路由仍正常（active 跟随 data-page 而非位置）
+  click($('.nav-item[data-page="incidents"]'));
+  ok($("#page-incidents").classList.contains("active"), "重排后点击事件管理仍正确路由");
+  click($('.nav-item[data-page="dashboard"]'));
+
+  // 复原默认顺序，避免影响后续用例的 DOM 假设；同时清掉偏好
+  window.localStorage.removeItem("opsdesk.navOrder.v1");
+  const g0 = $("#nav .group-label");                 // 「工作台」组标签
+  let anchor0 = g0;
+  ["dashboard", "incidents", "cmdb", "kb", "requests", "changes"].forEach(k => {
+    const it = $('.nav-item[data-page="' + k + '"]');
+    nav.insertBefore(it, anchor0.nextElementSibling);
+    anchor0 = it;
+  });
+  ok(navOrderNow() === "dashboard,incidents,cmdb,kb,requests,changes", "测试后已复原默认顺序", navOrderNow());
+
   console.log("\n=== 12. 全局统计与异常检查 ===");
   const st = window.OpsBot.stats();
   ok(st.sessions === window.OpsBot.store.sessions.length, "统计会话数一致");
