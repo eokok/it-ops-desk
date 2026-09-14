@@ -14,6 +14,8 @@
 > 两个仓库内容完全同步（同一份 git 历史）。Gitee 侧仅作代码托管：**Gitee Pages 免费版已停止服务**，在线演示以 WorkBuddy 发布地址与 GitHub Pages 为准。
 >
 > WorkBuddy 发布地址由平台托管，可直接分享给他人访问；GitHub Pages 地址随仓库自动构建。两处均已用 `verify-live.js` 跑通 27 项端到端断言。
+>
+> **仓库只收录运行必需的文件**——9 个站点文件 + `README.md` + `.gitignore`，共 11 个。测试脚本、上传工具与预览截图属于开发期产物，**仅在本地保留、不随仓库分发**，排除规则见 `.gitignore`。
 
 ## 功能模块
 
@@ -161,27 +163,29 @@ python -m http.server 8080
 
 ## 文件结构
 
+仓库内容（11 个文件，即在线部署所需的全部内容）：
+
 ```
-outputs/
-├── index.html          # 页面入口与结构
-├── styles.css          # 浅色企业主题、响应式样式
-├── app.js              # 主系统：数据模型、持久化与全部交互逻辑（含 KB → 助手学习桥）
-├── bot-data.js         # 助手知识语料：同义词表、53 条 FAQ、103 条评测样本、22 条护栏样本
-├── bot-flows.js        # 助手流程数据：7 条诊断决策树、入职清单、插件元信息
-├── bot.js              # 助手引擎：混合检索、护栏层、分级编排、6 个插件、知识学习闭环、审计日志
-├── bot-ui.js           # 助手界面层：对话界面、审计回放页、看板挂件
-├── test-ui.js          # jsdom 无头集成测试（140 项断言）
-├── calibrate.js        # 检索校准回归脚本
-├── calibrate-guards.js # 护栏 + 知识库学习闭环回归脚本（47 项断言）
-├── debug.js            # 单查询打分明细诊断脚本
-├── probe-rules.js      # 对抗性输入探针（人工复核护栏话术）
-├── sim.js              # 端到端对话模拟脚本
-├── preview-*.png       # 界面预览截图
-├── chart.umd.min.js    # 本地 Chart.js
-└── xlsx.full.min.js    # 本地 SheetJS
+index.html          # 页面入口与结构
+styles.css          # 浅色企业主题、响应式样式
+app.js              # 主系统：数据模型、持久化与全部交互逻辑（含 KB → 助手学习桥）
+bot-data.js         # 助手知识语料：同义词表、53 条 FAQ、103 条评测样本、22 条护栏样本
+bot-flows.js        # 助手流程数据：7 条诊断决策树、入职清单、插件元信息
+bot.js              # 助手引擎：混合检索、护栏层、分级编排、6 个插件、知识学习闭环、审计日志
+bot-ui.js           # 助手界面层：对话界面、审计回放页、看板挂件
+chart.umd.min.js    # 本地 Chart.js
+xlsx.full.min.js    # 本地 SheetJS
+README.md           # 本文件
+.gitignore          # 仓库收录策略（排除开发期产物）
 ```
 
+`git clone` 后直接双击 `index.html` 即可运行，无需任何构建步骤。
+
+> **开发期产物不入库**：质检脚本（`test-ui.js` / `calibrate.js` / `calibrate-guards.js` / `debug.js` / `probe-rules.js` / `sim.js` / `verify-live.js`）、上传工具（`upload.py` / `gitee-upload.py`）与预览截图（`preview-*.png`）仅保留在本地开发环境。下文的「本地校验」「上传到 GitHub」「同步到 Gitee」章节描述的是这些本地脚本的用法，仓库副本中并不包含它们。
+
 ## 本地校验
+
+> 以下脚本仅存在于本地开发环境，**不随仓库分发**。
 
 ```bash
 # 检索回归（Top1 / Top3 / 自助解决率）+ 护栏评测
@@ -240,10 +244,16 @@ EDGE="C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" node verify-
 python upload.py --check          # 只读自检，确认凭据可用
 python upload.py --dry-run        # 只列出将上传的文件，不发起请求
 python upload.py                  # 上传全部文件
+python upload.py --prune          # 删除远端已不入库的旧文件（截图 / 质检脚本 / 工具）
+python upload.py --prune --dry-run    # 只列出将删除什么
 GH_FILES="README.md,bot.js" python upload.py   # 只传指定文件
 ```
 
-> 文件清单**自动维护**：`collect_files()` 按白名单扩展名（`.html/.css/.js/.md/.png/.py`）扫描目录，并排除 `_shot-*` 截图页、`*.log`、线上校验下载的 `live-*` 副本、隐藏文件等临时产物——**新增脚本或截图后直接跑 `python upload.py` 即可，不用手工往清单里加名字**。不放心时先 `--dry-run` 看一眼清单；未被收集的文件会在输出里列成 `SKIP` 便于核对。另两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
+> 文件清单**自动维护**：`collect_files()` 按白名单扩展名（`.html/.css/.js/.md/.png/.py`）扫描目录，依次排除 `_shot-*` 截图页、`*.log`、线上校验下载的 `live-*` 副本、隐藏文件等临时产物，再用 `DEV_RE` 滤掉开发期产物（质检脚本 / 上传工具 / 预览截图）——**新增运行必需的文件后直接跑 `python upload.py` 即可，不用手工往清单里加名字**。不放心时先 `--dry-run` 看一眼清单；未被收集的文件会在输出里列成 `SKIP 本地保留（不入库）` 便于核对。
+>
+> 仓库策略收紧后，远端会残留旧版本传上去的文件。**GitHub 侧无法 `git push`（域名被代理封禁），只能用 Contents API 删除**，故提供 `--prune`：只删命中 `DEV_RE` 且不在本次上传清单里的文件，绝不动其它内容，遇到未识别的文件会打 `WARN ... 保留不动`。
+>
+> 其余两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
 
 ### 同步到 Gitee
 
@@ -251,7 +261,7 @@ Gitee 的情况与 GitHub 恰好相反：**直连可达、不需要代理**，�
 
 ```bash
 # 推荐：git 直推（本地已配置 gitee remote）
-git push gitee main:main
+git push gitee main:main        # 新增与删除都随提交一起同步（删除无需 API）
 
 # 备用：Contents API 通道
 python gitee-upload.py --check                  # 只读自检（凭据 + 仓库可达）
@@ -268,26 +278,25 @@ GITEE_FILES="README.md" python gitee-upload.py  # 只传指定文件
 > ③ Gitee OpenAPI 的 `private` 参数**用 JSON 传 `false` 会被忽略**（仓库建出来仍是私有），改用 form 编码才生效；
 > ④ `PATCH /repos/{owner}/{repo}` 修改仓库设置时 **必须带上 `name` 字段**，否则报 400 `name is missing`；
 > ⑤ **Gitee 的 raw 端点有内容风控，且异步触发、无法从客户端可靠绕过**：`xlsx.full.min.js`（881 KB 压缩库）会被返回 `451 The content may contain violation information`。
-> 已实测确认：**文件在仓库里是完好的** —— `contents` 与 `git/blobs` API 都能完整取回 881956 字节、与本地逐字节一致，`git clone` / `pull` 全程不受影响，**被拦的只有 raw 直链通道**（26 个文件里仅此一个）。
+> 已实测确认：**文件在仓库里是完好的** —— `contents` 与 `git/blobs` API 都能完整取回 881956 字节、与本地逐字节一致，`git clone` / `pull` 全程不受影响，**被拦的只有 raw 直链通道**（仓库 11 个文件里仅此一个）。
 > 曾尝试补一行 vendored 来源注释以改变内容指纹：推送后能短暂放行（HTTP 200），但后台复审后再次拦下，属服务端策略，客户端无可行的稳定规避方式。若确实需要在线引用该库，改用公共 CDN（如 `cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js`）或本地 clone 运行。
 
 ## 预览
 
-| 智能助手 | 审计与回放 |
-| --- | --- |
-| ![助手](preview-assistant.png) | ![回放](preview-replay.png) |
+直接打开在线演示即可看到实际界面，无需安装：
 
-| 数据看板 | 审计明细 |
-| --- | --- |
-| ![看板](preview-dashboard.png) | ![审计](preview-audit.png) |
+- **WorkBuddy 发布**：<https://itopsdesk.app.workbuddy.host/>
+- **GitHub Pages**：<https://eokok.github.io/it-ops-desk/>
 
-| 服务原则护栏（风险警示 + 值班电话） | 知识库学习闭环（学习状态） |
+| 页面 | 位置 |
 | --- | --- |
-| ![护栏](preview-guard.png) | ![学习](preview-learn.png) |
+| 数据看板（指标卡 + 状态 / 优先级 / 趋势 / 分类图表） | 首页默认页 |
+| 事件管理 · 配置管理 (CMDB) · 知识库 | 左侧「工作台」分组 |
+| IT 智能助手（自助问答 / 故障诊断 / 建单 / 入职指引） | 左侧「智能服务」分组 |
+| 审计与回放（会话审计 / 工具调用明细 / 时间轴回放播放器） | 左侧「系统」分组 |
+| 评测回归（103 条检索样本 + 22 条护栏样本，一键运行） | 数据看板 → 检索评测 |
 
-| 线上站点实测（GitHub Pages） |
-| --- |
-| ![线上](preview-live.png) |
+> 界面截图不随仓库分发（避免仓库里堆积静态资源），需要看效果请访问上面的在线地址。
 
 ## 说明
 
