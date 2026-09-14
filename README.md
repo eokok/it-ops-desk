@@ -6,11 +6,14 @@
 
 | 用途 | 地址 |
 | --- | --- |
+| 在线演示（WorkBuddy 发布） | https://itopsdesk.app.workbuddy.host/ |
 | 在线演示（GitHub Pages） | https://eokok.github.io/it-ops-desk/ |
 | GitHub 仓库 | https://github.com/eokok/it-ops-desk |
 | Gitee 镜像仓库 | https://gitee.com/eokok/it-ops-desk |
 
-> 两个仓库内容完全同步（同一份 git 历史）。Gitee 侧仅作代码托管：**Gitee Pages 免费版已停止服务**，在线演示仍以 GitHub Pages 为准。
+> 两个仓库内容完全同步（同一份 git 历史）。Gitee 侧仅作代码托管：**Gitee Pages 免费版已停止服务**，在线演示以 WorkBuddy 发布地址与 GitHub Pages 为准。
+>
+> WorkBuddy 发布地址由平台托管，可直接分享给他人访问；GitHub Pages 地址随仓库自动构建。两处均已用 `verify-live.js` 跑通 27 项端到端断言。
 
 ## 功能模块
 
