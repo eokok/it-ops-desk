@@ -2,6 +2,16 @@
 
 一个类 ServiceNow 的 IT 运维工单管理平台，纯前端实现，开箱即用，数据存储在浏览器本地（localStorage）。
 
+## 在线地址与代码仓库
+
+| 用途 | 地址 |
+| --- | --- |
+| 在线演示（GitHub Pages） | https://eokok.github.io/it-ops-desk/ |
+| GitHub 仓库 | https://github.com/eokok/it-ops-desk |
+| Gitee 镜像仓库 | https://gitee.com/eokok/it-ops-desk |
+
+> 两个仓库内容完全同步（同一份 git 历史）。Gitee 侧仅作代码托管：**Gitee Pages 免费版已停止服务**，在线演示仍以 GitHub Pages 为准。
+
 ## 功能模块
 
 - **数据看板 (Dashboard)**：工单总数、待处理、已解决、SLA 达标率等指标卡，状态分布 / 优先级 / 趋势 / 分类等多张图表。
@@ -231,6 +241,30 @@ GH_FILES="README.md,bot.js" python upload.py   # 只传指定文件
 ```
 
 > 文件清单**自动维护**：`collect_files()` 按白名单扩展名（`.html/.css/.js/.md/.png/.py`）扫描目录，并排除 `_shot-*` 截图页、`*.log`、线上校验下载的 `live-*` 副本、隐藏文件等临时产物——**新增脚本或截图后直接跑 `python upload.py` 即可，不用手工往清单里加名字**。不放心时先 `--dry-run` 看一眼清单；未被收集的文件会在输出里列成 `SKIP` 便于核对。另两个坑：① 更新已存在文件必须先在 PUT payload 里带上远端 `sha`（脚本内部先 GET `?ref=branch` 取），否则报 422；② GitHub 服务端 ruleset 校验偶发超时返回 409（`Timed out validating rule`），属瞬时故障，脚本已内置退避重试。此外 GCM 调用要求 `git.exe` 在 PATH 中，且它在 Windows 上以 GBK 输出错误信息，脚本均已处理。
+
+### 同步到 Gitee
+
+Gitee 的情况与 GitHub 恰好相反：**直连可达、不需要代理**，所以优先用 `git` 推送（连提交历史一起同步），`gitee-upload.py` 作为 API 通道备用。
+
+```bash
+# 推荐：git 直推（本地已配置 gitee remote）
+git push gitee main:main
+
+# 备用：Contents API 通道
+python gitee-upload.py --check                  # 只读自检（凭据 + 仓库可达）
+python gitee-upload.py --dry-run                # 只列清单，不发请求
+python gitee-upload.py                          # 全量上传
+GITEE_FILES="README.md" python gitee-upload.py  # 只传指定文件
+```
+
+凭据解析顺序与 `upload.py` 一致：环境变量 `GITEE_TOKEN` / `GITEE_ACCESS_TOKEN` → 本机 Git Credential Manager（`gitee.com`）。
+
+> 这一路上踩到的坑，都已处理：
+> ① **git 默认会走本机代理**（`127.0.0.1`）导致连不上 Gitee，必须显式 `-c http.proxy= -c https.proxy=` 关闭代理；
+> ② 凭据助手在本环境下会挂起等待交互（甚至无提示），推送时改用**令牌直连 URL** + `GIT_TERMINAL_PROMPT=0`；
+> ③ Gitee OpenAPI 的 `private` 参数**用 JSON 传 `false` 会被忽略**（仓库建出来仍是私有），改用 form 编码才生效；
+> ④ `PATCH /repos/{owner}/{repo}` 修改仓库设置时 **必须带上 `name` 字段**，否则报 400 `name is missing`；
+> ⑤ **Gitee 的 raw 端点有内容风控**：`xlsx.full.min.js`（881 KB 压缩库）首次推送后被返回 `451 The content may contain violation information`。文件其实完好——`git/blobs` API 能完整取回且字节一致，被拦的只是 raw 通道；补一行 vendored 来源注释（改变内容指纹）后即恢复正常。**clone / pull 全程不受影响**。
 
 ## 预览
 
