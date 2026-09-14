@@ -1,0 +1,23 @@
+# 仓库只收录「运行必需」的文件：
+#   index.html / styles.css / app.js / bot-data.js / bot-flows.js / bot.js
+#   bot-ui.js / chart.umd.min.js / xlsx.full.min.js / README.md
+# 以下开发期产物仅保留在本地开发环境，不入库、不上传（保持仓库干净）。
+preview-*.png
+test-ui.js
+calibrate.js
+calibrate-guards.js
+debug.js
+probe-rules.js
+sim.js
+verify-live.js
+upload.py
+gitee-upload.py
+
+# 临时产物
+_*
+*.log
+*.tmp
+*.bak
+*.old
+live-*.html
+live-*.js
