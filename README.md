@@ -264,7 +264,9 @@ GITEE_FILES="README.md" python gitee-upload.py  # 只传指定文件
 > ② 凭据助手在本环境下会挂起等待交互（甚至无提示），推送时改用**令牌直连 URL** + `GIT_TERMINAL_PROMPT=0`；
 > ③ Gitee OpenAPI 的 `private` 参数**用 JSON 传 `false` 会被忽略**（仓库建出来仍是私有），改用 form 编码才生效；
 > ④ `PATCH /repos/{owner}/{repo}` 修改仓库设置时 **必须带上 `name` 字段**，否则报 400 `name is missing`；
-> ⑤ **Gitee 的 raw 端点有内容风控**：`xlsx.full.min.js`（881 KB 压缩库）首次推送后被返回 `451 The content may contain violation information`。文件其实完好——`git/blobs` API 能完整取回且字节一致，被拦的只是 raw 通道；补一行 vendored 来源注释（改变内容指纹）后即恢复正常。**clone / pull 全程不受影响**。
+> ⑤ **Gitee 的 raw 端点有内容风控，且异步触发、无法从客户端可靠绕过**：`xlsx.full.min.js`（881 KB 压缩库）会被返回 `451 The content may contain violation information`。
+> 已实测确认：**文件在仓库里是完好的** —— `contents` 与 `git/blobs` API 都能完整取回 881956 字节、与本地逐字节一致，`git clone` / `pull` 全程不受影响，**被拦的只有 raw 直链通道**（26 个文件里仅此一个）。
+> 曾尝试补一行 vendored 来源注释以改变内容指纹：推送后能短暂放行（HTTP 200），但后台复审后再次拦下，属服务端策略，客户端无可行的稳定规避方式。若确实需要在线引用该库，改用公共 CDN（如 `cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js`）或本地 clone 运行。
 
 ## 预览
 
